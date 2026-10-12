@@ -1,0 +1,221 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.github.rurulalanana</groupId>
+  <artifactId>gb28181-sip</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+
+  <name>gb28181-sip</name>
+  <description>
+    GB/T 28181—2022 SIP 信令模块。零 Spring 依赖，仅提供 SIP + MANSCDP + SDP 协议层，
+    业务与流媒体处理全部通过回调/SPI 外置。
+  </description>
+  <url>https://github.com/rurulalanana/gb28181-sip</url>
+
+  <licenses>
+    <license>
+      <name>The Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <id>rurulalanana</id>
+      <name>rurulalanana</name>
+      <url>https://github.com/rurulalanana</url>
+    </developer>
+  </developers>
+
+  <scm>
+    <url>https://github.com/rurulalanana/gb28181-sip</url>
+    <connection>scm:git:https://github.com/rurulalanana/gb28181-sip.git</connection>
+    <developerConnection>scm:git:https://github.com/rurulalanana/gb28181-sip.git</developerConnection>
+    <tag>HEAD</tag>
+  </scm>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+    <maven.compiler.source>1.8</maven.compiler.source>
+    <maven.compiler.target>1.8</maven.compiler.target>
+
+    <lombok.version>1.18.30</lombok.version>
+    <jain.sip.version>1.2.344</jain.sip.version>
+    <slf4j.version>1.7.36</slf4j.version>
+    <jedis.version>4.3.2</jedis.version>
+    <commons.lang3.version>3.12.0</commons.lang3.version>
+    <commons.codec.version>1.15</commons.codec.version>
+    <commons.collections4.version>4.4</commons.collections4.version>
+    <jackson.version>2.13.5</jackson.version>
+    <log4j.version>1.2.17</log4j.version>
+    <junit.version>4.13.2</junit.version>
+  </properties>
+
+  <dependencies>
+    <!-- SIP 协议栈：javax.sip (RFC 3261) 参考实现 -->
+    <dependency>
+      <groupId>javax.sip</groupId>
+      <artifactId>jain-sip-ri</artifactId>
+      <version>${jain.sip.version}</version>
+    </dependency>
+
+    <!-- ===== 工具库 ===== -->
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <version>${lombok.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-lang3</artifactId>
+      <version>${commons.lang3.version}</version>
+    </dependency>
+    <!-- SIP Digest 认证需要 MD5，直接用 commons-codec 的 DigestUtils -->
+    <dependency>
+      <groupId>commons-codec</groupId>
+      <artifactId>commons-codec</artifactId>
+      <version>${commons.codec.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-collections4</artifactId>
+      <version>${commons.collections4.version}</version>
+    </dependency>
+    <!-- 集群节点间信令转发需要序列化 -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>${jackson.version}</version>
+    </dependency>
+
+    <!-- 日志门面：仅 API，绑定由使用方决定 -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>${slf4j.version}</version>
+    </dependency>
+
+    <!-- jain-sip 1.2.344 的 SipStackImpl 直接依赖 log4j 1.x（org.apache.log4j.Priority），
+         缺少该类会导致 createSipStack 抛 PeerUnavailableException。
+         这是协议栈的硬依赖，不可移除。 -->
+    <dependency>
+      <groupId>log4j</groupId>
+      <artifactId>log4j</artifactId>
+      <version>${log4j.version}</version>
+    </dependency>
+
+    <!-- Redis 中间件（可选）：分布式设备注册表与跨节点信令转发。
+         不需要集群时调用方可完全不引入本依赖。 -->
+    <dependency>
+      <groupId>redis.clients</groupId>
+      <artifactId>jedis</artifactId>
+      <version>${jedis.version}</version>
+      <optional>true</optional>
+    </dependency>
+
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>${slf4j.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.8.1</version>
+        <configuration>
+          <source>1.8</source>
+          <target>1.8</target>
+          <encoding>UTF-8</encoding>
+          <annotationProcessorPaths>
+            <path>
+              <groupId>org.projectlombok</groupId>
+              <artifactId>lombok</artifactId>
+              <version>${lombok.version}</version>
+            </path>
+          </annotationProcessorPaths>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>2.22.2</version>
+      </plugin>
+
+      <!-- 发布到 GitHub Packages / Maven Central -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-source-plugin</artifactId>
+        <version>3.2.1</version>
+        <executions>
+          <execution>
+            <id>attach-sources</id>
+            <goals><goal>jar-no-fork</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <version>3.4.1</version>
+        <configuration>
+          <source>8</source>
+          <encoding>UTF-8</encoding>
+          <docencoding>UTF-8</docencoding>
+          <charset>UTF-8</charset>
+          <doclint>none</doclint>
+          <failOnError>false</failOnError>
+        </configuration>
+        <executions>
+          <execution>
+            <id>attach-javadocs</id>
+            <goals><goal>jar</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <!-- GitHub Packages：mvn deploy -Pgithub -->
+    <profile>
+      <id>github</id>
+      <distributionManagement>
+        <repository>
+          <id>github</id>
+          <name>GitHub Packages</name>
+          <url>https://maven.pkg.github.com/rurulalanana/gb28181-sip</url>
+        </repository>
+      </distributionManagement>
+    </profile>
+
+    <!-- Maven Central：mvn deploy -Pcentral（需 GPG 签名 + settings.xml 凭据） -->
+    <profile>
+      <id>central</id>
+      <distributionManagement>
+        <repository>
+          <id>central</id>
+          <name>Maven Central</name>
+          <url>https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/</url>
+        </repository>
+      </distributionManagement>
+    </profile>
+  </profiles>
+</project>

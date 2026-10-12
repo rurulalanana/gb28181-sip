@@ -1,0 +1,319 @@
+package io.github.rurulalanana.gb28181.sip.internal;
+
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
+
+import javax.sip.SipFactory;
+import javax.sip.address.Address;
+import javax.sip.address.AddressFactory;
+import javax.sip.address.SipURI;
+import javax.sip.header.CSeqHeader;
+import javax.sip.header.CallIdHeader;
+import javax.sip.header.ContactHeader;
+import javax.sip.header.ContentTypeHeader;
+import javax.sip.header.EventHeader;
+import javax.sip.header.FromHeader;
+import javax.sip.header.Header;
+import javax.sip.header.MaxForwardsHeader;
+import javax.sip.header.SubscriptionStateHeader;
+import javax.sip.header.ToHeader;
+import javax.sip.header.ViaHeader;
+import javax.sip.header.WWWAuthenticateHeader;
+import javax.sip.message.MessageFactory;
+import javax.sip.message.Request;
+import javax.sip.message.Response;
+import java.security.SecureRandom;
+import java.text.ParseException;
+import java.util.Collections;
+import java.util.List;
+import java.util.UUID;
+
+/**
+ * SIP 报文工厂。
+ *
+ * <p>封装 {@code javax.sip} 的 {@link MessageFactory} 与
+ * {@link gov.nist.javax.sip.header.HeaderFactoryExt}，并按 GB/T 28181 约定提供便捷构造
+ * （20 位编码 SIP URI、标准内容类型等）。
+ *
+ * <p>内部方法不抛受检异常，统一转为 {@link SipBuildException}。
+ */
+@Slf4j
+public final class SipMessageFactory {
+
+    /** MANSCDP 内容类型（标准 9.5.3.1 / 9.11.1.3）。 */
+    public static final String MANSCDP_CONTENT_TYPE = "Application/MANSCDP+xml";
+    /** SDP 内容类型（标准 9.2.2.2 c）。 */
+    public static final String SDP_CONTENT_TYPE = "application/sdp";
+
+    private static final SecureRandom RANDOM = new SecureRandom();
+
+    private final SipFactory sipFactory;
+    private final AddressFactory addressFactory;
+    private final MessageFactory messageFactory;
+    private final gov.nist.javax.sip.header.HeaderFactoryExt headerFactory;
+
+    public SipMessageFactory() {
+        this(SipFactory.getInstance());
+    }
+
+    public SipMessageFactory(SipFactory sipFactory) {
+        this.sipFactory = sipFactory;
+        try {
+            this.addressFactory = sipFactory.createAddressFactory();
+            this.messageFactory = sipFactory.createMessageFactory();
+            this.headerFactory = (gov.nist.javax.sip.header.HeaderFactoryExt)
+                    sipFactory.createHeaderFactory();
+        } catch (Exception e) {
+            throw new SipBuildException("SIP 工厂初始化失败", e);
+        }
+    }
+
+    public gov.nist.javax.sip.header.HeaderFactoryExt headerFactory() {
+        return headerFactory;
+    }
+
+    public SipFactory sipFactory() {
+        return sipFactory;
+    }
+
+    // ==================== 基础构件 ====================
+
+    /**
+     * 构造 GB28181 SIP URI（标准 6.1.2）。
+     * <p>{@code sip:username@domain}，username 为 20 位编码，domain 取其前 10 位。
+     *
+     * @param deviceId 设备编码（作为 username）
+     * @param host     主机地址
+     * @param port     端口
+     */
+    public SipURI createUri(String deviceId, String host, int port) {
+        String domain = io.github.rurulalanana.gb28181.sip.constant.GbId.isValidDeviceId(deviceId)
+                ? io.github.rurulalanana.gb28181.sip.constant.GbId.domainOf(deviceId)
+                : StringUtils.defaultIfBlank(host, "127.0.0.1");
+        try {
+            SipURI uri = addressFactory.createSipURI(deviceId, domain);
+            uri.setHost(host);
+            uri.setPort(port);
+            return uri;
+        } catch (ParseException e) {
+            throw new SipBuildException("构造 SIP URI 失败: " + deviceId, e);
+        }
+    }
+
+    /** 构造仅含 host:port 的 URI（Request-URI 用）。 */
+    public SipURI createHostUri(String host, int port) {
+        try {
+            SipURI uri = addressFactory.createSipURI(null, host);
+            uri.setHost(host);
+            uri.setPort(port);
+            return uri;
+        } catch (ParseException e) {
+            throw new SipBuildException("构造 host URI 失败: " + host, e);
+        }
+    }
+
+/** 生成随机 tag。 */
+    public static String newTag() {
+        return Long.toHexString(RANDOM.nextLong());
+    }
+
+    /** 生成随机 Call-ID。 */
+    public static String newCallId() {
+        return UUID.randomUUID().toString().replace("-", "");
+    }
+
+    // ==================== 请求 ====================
+
+    /**
+     * 构造带完整必需头域的请求。
+     *
+     * @param toTag       To 头 tag，可 {@code null}
+     * @param contentType 内容类型，可 {@code null}
+     * @param body        消息体，可 {@code null}
+     */
+    public Request buildRequest(String method, SipURI requestUri,
+                                SipURI fromUri, String fromTag,
+                                SipURI toUri, String toTag,
+                                String callId, long cSeq,
+                                String contentType, String body) {
+        try {
+            FromHeader from = headerFactory.createFromHeader(
+                    addressFactory.createAddress(fromUri), fromTag);
+            ToHeader to = headerFactory.createToHeader(
+                    addressFactory.createAddress(toUri), toTag);
+            CSeqHeader cseq = headerFactory.createCSeqHeader(cSeq, method);
+            CallIdHeader callIdHeader = headerFactory.createCallIdHeader(callId);
+            MaxForwardsHeader maxForwards = headerFactory.createMaxForwardsHeader(70);
+            ContentTypeHeader ct = contentType(contentType);
+
+            // Via 由协议栈在发送时自动补全，此处传空列表
+            List<ViaHeader> via = Collections.<ViaHeader>emptyList();
+            Request request = messageFactory.createRequest(
+                    requestUri, method, callIdHeader, cseq, from, to,
+                    via, maxForwards, ct, body);
+
+            // REGISTER 等需带 Contact
+            ContactHeader contact = headerFactory.createContactHeader(
+                    addressFactory.createAddress(fromUri));
+            request.addHeader(contact);
+            return request;
+        } catch (Exception e) {
+            throw new SipBuildException("构造 SIP 请求失败: " + method, e);
+        }
+    }
+
+    /**
+     * 构造内容类型头。
+     *
+     * <p>标准使用 {@code Application/MANSCDP+xml}（含参数形式），
+     * 故此处按 type/subtype 拆分后调用双参重载。
+     */
+    private ContentTypeHeader contentType(String contentType) throws ParseException {
+        if (StringUtils.isBlank(contentType)) {
+            return null;
+        }
+        int slash = contentType.indexOf('/');
+        if (slash < 0) {
+            return headerFactory.createContentTypeHeader(contentType, "xml");
+        }
+        return headerFactory.createContentTypeHeader(
+                contentType.substring(0, slash), contentType.substring(slash + 1));
+    }
+
+    /** 构造 MANSCDP MESSAGE 请求（标准 9.3 c / 9.5 d）。 */
+    public Request buildMessage(SipURI requestUri, SipURI fromUri, SipURI toUri, String xml) {
+        return buildRequest(Request.MESSAGE, requestUri, fromUri, newTag(),
+                toUri, null, newCallId(), 1L, MANSCDP_CONTENT_TYPE, xml);
+    }
+
+    /** 构造带 SDP 的 INVITE 请求（标准 9.2）。 */
+    public Request buildInvite(SipURI requestUri, SipURI fromUri, SipURI toUri,
+                               String sdp, String subject) {
+        Request req = buildRequest(Request.INVITE, requestUri, fromUri, newTag(),
+                toUri, null, newCallId(), 1L, SDP_CONTENT_TYPE, sdp);
+        if (StringUtils.isNotBlank(subject)) {
+            try {
+                req.addHeader(headerFactory.createHeader(SipHeaders.SUBJECT, subject));
+            } catch (ParseException e) {
+                log.warn("构造 Subject 头失败: {}", e.getMessage());
+            }
+        }
+        return req;
+    }
+
+    /**
+     * 构造 SUBSCRIBE 请求（标准 9.11，RFC 6665）。
+     *
+     * @param eventName 事件名，如 {@code Catalog}
+     * @param expires   订阅有效期秒数
+     */
+    public Request buildSubscribe(SipURI requestUri, SipURI fromUri, SipURI toUri,
+                                  String eventName, int expires, String body) {
+        Request req = buildRequest("SUBSCRIBE", requestUri, fromUri, newTag(),
+                toUri, null, newCallId(), 1L,
+                StringUtils.isBlank(body) ? null : MANSCDP_CONTENT_TYPE, body);
+        try {
+            if (StringUtils.isNotBlank(eventName)) {
+                EventHeader event = (EventHeader) headerFactory.createHeader(SipHeaders.EVENT);
+                event.setEventId(eventName);
+                req.addHeader(event);
+            }
+            req.addHeader(headerFactory.createHeader(SipHeaders.EXPIRES, String.valueOf(expires)));
+        } catch (ParseException e) {
+            throw new SipBuildException("构造 SUBSCRIBE 失败", e);
+        }
+        return req;
+    }
+
+    // ==================== 响应 ====================
+
+/**
+ * 构造对请求的响应。
+ *
+ * <p><b>注意</b>：jain-sip 的 {@code createResponse(int, Request, ContentType, body)}
+ * 在 body 为 {@code null} 时会抛 NPE，故无消息体场景走两参重载。
+ *
+ * @param statusCode 状态码
+ * @param body      消息体，可 {@code null}
+ */
+    public Response buildResponse(int statusCode, Request request, String contentType, String body) {
+        try {
+            if (StringUtils.isBlank(body)) {
+                Response response = messageFactory.createResponse(statusCode, request);
+                return withToTag(response);
+            }
+            ContentTypeHeader ct = contentType(contentType);
+            byte[] raw = body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            Response response = ct == null
+                    ? messageFactory.createResponse(statusCode, request, null, raw)
+                    : messageFactory.createResponse(statusCode, request, ct, raw);
+            return withToTag(response);
+        } catch (Exception e) {
+            throw new SipBuildException("构造 SIP 响应失败: " + statusCode, e);
+        }
+    }
+
+    /**
+     * 应答的 To 头需带 tag（RFC 3261 §8.2.6.2）。
+     */
+    private Response withToTag(Response response) throws ParseException {
+        ToHeader to = (ToHeader) response.getHeader(SipHeaders.TO);
+        if (to != null && to.getTag() == null) {
+            response.addHeader(headerFactory.createToHeader(to.getAddress(), newTag()));
+        }
+        return response;
+    }
+
+    /** 构造 401 challenge（标准 9.1.2.1 b）。 */
+    public Response buildUnauthorized(Request request, String realm, String nonce) {
+        Response response = buildResponse(Response.UNAUTHORIZED, request, null, null);
+        try {
+            WWWAuthenticateHeader auth = headerFactory.createWWWAuthenticateHeader(
+                    "Digest realm=\"" + realm + "\", nonce=\"" + nonce + "\"");
+            auth.setAlgorithm("MD5");
+            response.addHeader(auth);
+        } catch (Exception e) {
+            throw new SipBuildException("构造 401 challenge 失败", e);
+        }
+        return response;
+    }
+
+    /**
+     * 追加 {@code Subscription-State} 头（RFC 6665）。
+     *
+     * @param state   {@code active} / {@code terminated} / {@code pending}
+     * @param expires 剩余有效期秒数，{@code <=0} 时不带 expires 参数
+     */
+    public void addSubscriptionState(Response response, String state, int expires) {
+        try {
+            SubscriptionStateHeader ssh = (SubscriptionStateHeader)
+                    headerFactory.createHeader(SipHeaders.SUBSCRIPTION_STATE);
+            ssh.setState(state);
+            if (expires > 0) {
+                ssh.setExpires(expires);
+            }
+            response.addHeader(ssh);
+        } catch (Exception e) {
+            log.warn("构造 Subscription-State 失败: {}", e.getMessage());
+        }
+    }
+
+    /** 提取请求的 Request-URI 字符串。 */
+    public static String requestUriOf(Request request) {
+        return request.getRequestURI() == null ? null : request.getRequestURI().toString();
+    }
+
+    /** 提取 {@code user} 部分（设备编码）。 */
+    public static String userOf(Address address) {
+        if (address == null || address.getURI() == null) {
+            return null;
+        }
+        String uri = address.getURI().toString();
+        int at = uri.indexOf('@');
+        int colon = uri.indexOf(':');
+        if (colon >= 0 && at > colon) {
+            return uri.substring(colon + 1, at);
+        }
+        return null;
+    }
+}

@@ -1,0 +1,28 @@
+# Maven
+target/
+*.jar
+*.war
+*.class
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+logs/
+
+# 临时
+.cache/
+*.tmp
+*.bak
