@@ -354,16 +354,28 @@ public class Gb28181SipClient {
     /** 取设备会话；未注册时抛异常。 */
     private SipPeer requireSession(String deviceId) {
         DeviceSession session = server.deviceRegistry().get(deviceId);
-        if (session == null) {
-            throw new IllegalStateException("设备未注册或会话已失效: " + deviceId);
+        if (session != null) {
+            return SipPeer.builder()
+                    .deviceId(deviceId)
+                    .ip(session.getIp())
+                    .port(session.getPort())
+                    .transport(session.getTransport())
+                    .domain(session.getDomain())
+                    .build();
         }
-        return SipPeer.builder()
-                .deviceId(deviceId)
-                .ip(session.getIp())
-                .port(session.getPort())
-                .transport(session.getTransport())
-                .domain(session.getDomain())
-                .build();
+        // 级联下级平台不在设备注册表中，需回落到级联注册表寻址
+        io.github.rurulalanana.gb28181.sip.cascade.CascadePlatform platform =
+                server.getCascade().getRegistry().get(deviceId);
+        if (platform != null) {
+            return SipPeer.builder()
+                    .deviceId(deviceId)
+                    .ip(platform.getIp())
+                    .port(platform.getPort())
+                    .transport(platform.getTransport())
+                    .domain(platform.getDomain())
+                    .build();
+        }
+        throw new IllegalStateException("设备未注册或会话已失效: " + deviceId);
     }
 
     /** 推导设备地址（优先取编码低位，退化为 1）。 */

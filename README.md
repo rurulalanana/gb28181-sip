@@ -197,7 +197,71 @@ gb28181:relay:{nodeId}      Channel 节点间信令转发
 
 ---
 
-## 6. 认证
+## 6. 国标级联
+
+标准第 8 章的**信令层**实现。流转发不在本模块。
+
+```java
+Gb28181SipServer server = Gb28181SipServer.builder()
+        .serverId("34020000001100000001")   // 本级编码
+        .port(5060)
+        .callback(new SipCallback() {
+
+            @Override
+            public void onCascadePlatformRegister(CascadeEvents.PlatformRegistered e) {
+                // 下级平台注册（e.isRefresh() 区分续注册）
+                topologyService.addNode(e.getPlatformId(), e.getAddress());
+            }
+
+            @Override
+            public void onCascadePlatformUnregister(CascadeEvents.PlatformUnregistered e) {
+                // 下线：expired / logout / silent
+                topologyService.removeNode(e.getPlatformId());
+            }
+
+            @Override
+            public void onCascadeCatalog(CascadeEvents.CatalogMerged e) {
+                // 多下级目录已聚合去重，且已用上级原始 SN 回复上级
+                catalogCache.merge(e.getItems());
+            }
+
+            @Override
+            public void onCascadeInvite(CascadeEvents.CascadeInvite e) {
+                // 上级点播下级：分配收流地址，向下级转发点播，再回复上级
+                String recvIp = streamService.allocateReceivePort();
+                server.client().invitePlay(e.getPlatformId(), sdpTo(e, recvIp));
+                server.client().respondInvite(e.getRawRequestEvent(), sdpFrom(recvIp));
+            }
+        })
+        .build()
+        .start();
+```
+
+**手动登记下级平台**（下级先注册上来，或从配置读取）：
+
+```java
+server.getCascade().onPlatformRegister(下级编码, "ip:port", 3600);
+server.getCascade().queryCascadedCatalog(上级编码, sn, timeoutMs);
+server.getCascade().sweepTimeout();// 清理超时下级
+```
+
+**级联目录聚合的处理流程**：
+
+```
+上级 Catalog 查询（SN=100）
+   ↓ 本级分配内部 SN（避免与上级事务冲突）
+并发下发 → 下级A(SN=2) 下级B(SN=3)
+   ↓ 各下级应答
+按设备编码去重合并
+   ↓
+用上级原始 SN=100 生成应答 → 回给上级
+```
+
+重叠区域（两下级上报同一设备）以**先到者**为准，保证幂等。
+
+---
+
+## 7. 认证
 
 ```java
 // 单设备
@@ -215,7 +279,7 @@ RFC 3261 §22：无 `Authorization` → 401 challenge，携带则校验摘要。
 
 ---
 
-## 7. 协议要点（已按标准逐字实现）
+## 8. 协议要点（已按标准逐字实现）
 
 ### SSRC（附录 G `y=` 字段）
 
@@ -283,7 +347,7 @@ SdpMediaFormat.audioOnly("1",8,1);                 // v//////a/1/8/1
 
 ---
 
-## 8. 构建与发布
+## 9. 构建与发布
 
 ```bash
 # 构建 + 测试
@@ -310,17 +374,19 @@ mvn deploy -Paliyun-rds   # 阿里云效 Packages
 
 ---
 
-## 9. 已知限制
+## 10. 已知限制
 
 - 标准附录 A 只给 XSD Schema、**未给实例 XML**，MANSCDP 采用松散 DOM 模型，厂商私有扩展字段原样保留（2022 版已删除的 2016 版遗留字段如 `SafetyWay` 需作为自定义元素处理）
 - `MediaControl` 为兼容保留，非标准内容
-- 集群转发为**节点级路由**（整条信令转给持有设备的节点），未实现平台级的信令级联拆分
+- 国标级联**仅实现信令层**：下级平台注册/注销/心跳、级联目录查询聚合（并发转发 + 设备编码去重 + SN 重映射）、级联订阅穿透。**流转发不在本模块**，上级点播下级时通过 `onCascadeInvite` 回调交业务方处理
+- 级联目录聚合的默认超时为 5 秒；下级平台数量多时建议调大`CascadeManager` 的等待时间
+- 集群转发为**节点级路由**（整条信令转给持有设备的节点）
 - 仅 UDP 完整验证，TCP 通道未做端到端测试
 - `f=` 字段 XSD 声明 `length=8`，表 A.3 描述 8 字节（16 字符），标准自相矛盾；实现按表 A.3 输出 16 字符，`encodeHex4()` 可取 8 字符形态
 
 ---
 
-## 10. 目录结构
+## 11. 目录结构
 
 ```
 io.github.rurulalanana.gb28181.sip
@@ -331,6 +397,7 @@ io.github.rurulalanana.gb28181.sip
 ├── sdp/                      SDP 构造与解析
 ├── device/                   DeviceRegistry SPI + 内存实现
 ├── event/                    SipCallback 与事件对象
+├── cascade/                  国标级联（下级平台管理、目录聚合、订阅穿透）
 ├── security/                 摘要认证
 ├── cluster/                  Redis 注册表与节点间转发
 └── internal/                 jain-sip 适配（不对外暴露）
@@ -338,13 +405,13 @@ io.github.rurulalanana.gb28181.sip
 
 ---
 
-## 11. 测试
+## 12. 测试
 
 ```bash
 mvn test
 ```
 
-56 个测试，覆盖编码规则、MANSCDP 构造/解析、SDP、README 示例，
+70 个测试，覆盖编码规则、MANSCDP 构造/解析、SDP、国标级联、README 示例，
 以及**真实 UDP 报文往返**（REGISTER / MESSAGE / 心跳）——不是 mock。
 
 ---

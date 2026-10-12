@@ -183,4 +183,49 @@ public interface SipCallback {
      */
     default void onRawResponse(ResponseEvent event) {
     }
+
+    // =================================================================
+    //  国标级联（GB/T 28181—2022 第 8 章，仅信令层）
+    // =================================================================
+
+    /**
+     * 下级平台注册（含续注册）。
+     *
+     * <p>模块已完成编码校验与会话登记，此处供业务方记录拓扑、初始化业务数据。
+     */
+    default void onCascadePlatformRegister(
+            io.github.rurulalanana.gb28181.sip.cascade.CascadeEvents.PlatformRegistered event) {
+    }
+
+    /**
+     * 下级平台注销或超时下线。
+     *
+     * @param event.reason {@code expired} / {@code logout} / {@code silent}
+     */
+    default void onCascadePlatformUnregister(
+            io.github.rurulalanana.gb28181.sip.cascade.CascadeEvents.PlatformUnregistered event) {
+    }
+
+    /**
+     * 级联目录聚合完成。
+     *
+     * <p>模块已用<b>上级原始 SN</b> 生成应答并主动发送给上级，
+     * 此处仅供业务方同步本地目录缓存。
+     *
+     * @param event.totalCount 聚合后设备总数（已按编码去重）
+     */
+    default void onCascadeCatalog(
+            io.github.rurulalanana.gb28181.sip.cascade.CascadeEvents.CatalogMerged event) {
+    }
+
+    /**
+     * 上级平台请求级联点播。
+     *
+     * <p><b>流转发由业务方处理</b>：模块只完成信令协商，
+     * 业务方需在本回调中分配收流地址、向下级转发点播，
+     * 并调用 {@code client().respondInvite(event.getRawRequestEvent(), sdp)} 回复上级。
+     */
+    default void onCascadeInvite(
+            io.github.rurulalanana.gb28181.sip.cascade.CascadeEvents.CascadeInvite event) {
+    }
 }

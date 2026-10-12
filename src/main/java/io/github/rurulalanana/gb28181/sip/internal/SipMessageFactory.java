@@ -144,13 +144,19 @@ public final class SipMessageFactory {
             CSeqHeader cseq = headerFactory.createCSeqHeader(cSeq, method);
             CallIdHeader callIdHeader = headerFactory.createCallIdHeader(callId);
             MaxForwardsHeader maxForwards = headerFactory.createMaxForwardsHeader(70);
-            ContentTypeHeader ct = contentType(contentType);
+            // jain-sip 的 createRequest 对 ct 与 body 都要求非 null，
+            // 无消息体时用 application/octet-stream 占位（协议栈会忽略 Content-Type）
+            ContentTypeHeader ct = contentType(contentType != null ? contentType
+                    : "application/octet-stream");
 
             // Via 由协议栈在发送时自动补全，此处传空列表
             List<ViaHeader> via = Collections.<ViaHeader>emptyList();
+            // jain-sip 要求 body 参数非 null（无消息体时传空串而非 null），
+            // 否则 createRequest 抛 NPE("Null parameters")
+            String bodyArg = body == null ? "" : body;
             Request request = messageFactory.createRequest(
                     requestUri, method, callIdHeader, cseq, from, to,
-                    via, maxForwards, ct, body);
+                    via, maxForwards, ct, bodyArg);
 
             // REGISTER 等需带 Contact
             ContactHeader contact = headerFactory.createContactHeader(
@@ -214,8 +220,20 @@ public final class SipMessageFactory {
                 StringUtils.isBlank(body) ? null : MANSCDP_CONTENT_TYPE, body);
         try {
             if (StringUtils.isNotBlank(eventName)) {
-                EventHeader event = (EventHeader) headerFactory.createHeader(SipHeaders.EVENT);
-                event.setEventId(eventName);
+                // 事件的 type 取 Event 头冒号前的包名（如 "presence"），
+                // id 取具体事件名（如 "Catalog"）；先设 type 再设 id，
+                // 否则 createHeader 解析出的空 type 会导致 addHeader 失败
+                // createHeader("Event") 会因无初始值而解析失败，
+                // 须一次性给出完整头值 "Event: presence;id=Catalog"
+                String type = "presence";
+                String id = eventName;
+                int colon = eventName.indexOf(':');
+                if (colon > 0) {
+                    type = eventName.substring(0, colon);
+                    id = eventName.substring(colon + 1);
+                }
+                EventHeader event = (EventHeader) headerFactory.createHeader(
+                        SipHeaders.EVENT, type + ";id=" + id);
                 req.addHeader(event);
             }
             req.addHeader(headerFactory.createHeader(SipHeaders.EXPIRES, String.valueOf(expires)));

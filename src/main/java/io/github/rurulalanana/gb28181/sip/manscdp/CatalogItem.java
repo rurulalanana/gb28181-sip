@@ -29,7 +29,7 @@ import org.w3c.dom.Element;
  * 未设置的可选字段不输出。
  */
 @Getter
-@Builder
+@Builder(toBuilder = true)
 public class CatalogItem {
 
     // ---------- 顶层必选字段 ----------

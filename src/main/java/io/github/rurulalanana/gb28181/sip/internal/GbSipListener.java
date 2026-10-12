@@ -61,17 +61,23 @@ public class GbSipListener implements SipListener {
     private final DeviceRegistry registry;
     private final CredentialProvider credentialProvider;
     private final javax.sip.SipProvider provider;
+    /** 国标级联管理器；可为 {@code null}（未启用级联）。 */
+    private final io.github.rurulalanana.gb28181.sip.cascade.CascadeManager cascade;
+    /** 级联目录聚合等待下级应答的超时（毫秒）。 */
+    private final long cascadeTimeoutMs = 5000L;
 
     public GbSipListener(SipServerConfig config, SipMessageFactory factory,
                          SipCallback callback, DeviceRegistry registry,
                          CredentialProvider credentialProvider,
-                         javax.sip.SipProvider provider) {
+                         javax.sip.SipProvider provider,
+                         io.github.rurulalanana.gb28181.sip.cascade.CascadeManager cascade) {
         this.config = config;
         this.factory = factory;
         this.callback = callback;
         this.registry = registry;
         this.credentialProvider = credentialProvider;
         this.provider = provider;
+        this.cascade = cascade;
     }
 
     /**
@@ -139,7 +145,57 @@ public class GbSipListener implements SipListener {
     @Override
     public void processResponse(ResponseEvent responseEvent) {
         callback.onRawResponse(responseEvent);
+        // 级联目录聚合：下级平台的 Catalog 应答在此汇聚
+        collectCascadeCatalog(responseEvent);
         Gb28181SipClientBridge.onResponse(responseEvent);
+    }
+
+    /**
+     * 汇聚下级平台的目录应答。
+     *
+     * <p>仅在应答来自已注册的下级平台、且 SN 命中级联查询上下文时才消费，
+     * 其余应答照常透出给业务方。
+     */
+    private void collectCascadeCatalog(ResponseEvent event) {
+        if (cascade == null || event.getResponse() == null) {
+            return;
+        }
+        Response response = event.getResponse();
+        if (response.getStatusCode() != Response.OK) {
+            return;
+        }
+        Object raw = response.getRawContent();
+        if (raw == null) {
+            return;
+        }
+        String xml = new String((byte[]) raw, java.nio.charset.Charset.forName("UTF-8"));
+        io.github.rurulalanana.gb28181.sip.manscdp.ManscdpMessage msg;
+        try {
+            msg = io.github.rurulalanana.gb28181.sip.manscdp.ManscdpXml.parse(xml);
+        } catch (Exception e) {
+            return;
+        }
+        if (!"Response".equals(msg.getRootName())) {
+            return;
+        }
+        // 应答方：Response 的 DeviceID 是发起方（本级），真正的来源在 From 头
+        String from = userOf((javax.sip.header.FromHeader) response.getHeader(SipHeaders.FROM));
+        if (from == null) {
+            from = msg.getDeviceId();
+        }
+        java.util.List<io.github.rurulalanana.gb28181.sip.manscdp.CatalogItem> items =
+                new java.util.ArrayList<>();
+        for (org.w3c.dom.Element e : msg.items("DeviceList")) {
+            try {
+                items.add(io.github.rurulalanana.gb28181.sip.manscdp.CatalogItem.from(e));
+            } catch (Exception ignored) {
+                // 单条解析失败不影响整体聚合
+            }
+        }
+        boolean consumed = cascade.onCatalogResponse(from, msg.getSn(), items);
+        if (consumed) {
+            log.debug("级联目录应答已汇聚: from={}, sn={}", from, msg.getSn());
+        }
     }
 
     @Override
@@ -190,6 +246,20 @@ public class GbSipListener implements SipListener {
             }
         }
 
+        // ---- 级联分流：下级平台注册进级联注册表，不进设备注册表 ----
+        if (cascade != null && cascade.getRegistry().get(deviceId) != null) {
+            if (unregister) {
+                cascade.onPlatformUnregister(deviceId, "logout");
+            } else {
+                cascade.onPlatformRegister(deviceId, peer.getIp() + ":" + peer.getPort(), expires);
+            }
+            reply(event, buildRegisterResponse(request, expires));
+            callback.onRegister(RegisterEvent.builder()
+                    .peer(peer).deviceId(deviceId).expires(expires)
+                    .platformId(deviceId).unregistered(unregister).build());
+            return;
+        }
+
         // ---- 认证通过，记录会话 ----
         if (!unregister) {
             String contact = contactUriOf(request);
@@ -209,24 +279,7 @@ public class GbSipListener implements SipListener {
             registry.unregister(deviceId);
         }
 
-        // ---- 应答：携带 Date 头（标准 9.10.3） ----
-        Response response = factory.buildResponse(Response.OK, request, null, null);
-        try {
-            // Date 头须为 RFC 1123 格式，否则协议栈解析报 "bad wkday"
-            response.addHeader(factory.headerFactory().createHeader(SipHeaders.DATE,
-                    java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME
-                            .format(java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC))));
-            response.addHeader(factory.headerFactory().createHeader(SipHeaders.SERVER, "gb28181-sip/1.0"));
-            response.addHeader(factory.headerFactory().createUserAgentHeader(
-                    java.util.Collections.singletonList("gb28181-sip")));
-            if (!unregister) {
-                response.addHeader(factory.headerFactory().createExpiresHeader(
-                        expires > 0 ? expires : config.getRegisterExpires()));
-            }
-        } catch (Exception e) {
-            log.warn("构造 REGISTER 应答头失败: {}", e.getMessage());
-        }
-        send(event, response);
+        reply(event, buildRegisterResponse(request, unregister ? 0 : expires));
 
         callback.onRegister(RegisterEvent.builder()
                 .peer(peer)
@@ -278,6 +331,10 @@ public class GbSipListener implements SipListener {
 
         // ---- 心跳保活（A.2.5.2 / 9.10） ----
         if (io.github.rurulalanana.gb28181.sip.constant.CmdType.KEEPALIVE.value().equals(msg.getCmdType())) {
+            // 级联场景：来自下级平台的心跳应刷新平台会话，而非设备注册表
+            if (cascade != null && cascade.onPlatformKeepAlive(msg.getDeviceId())) {
+                return;
+            }
             registry.touch(msg.getDeviceId());
             callback.onKeepAlive(KeepAliveEvent.builder()
                     .peer(peer)
@@ -289,11 +346,46 @@ public class GbSipListener implements SipListener {
             return;
         }
 
+        // ---- 级联目录查询：本级作为下级收到上级查询时，聚合各下级后统一应答 ----
+        // 仅当本级确实挂有在线下级才走聚合；否则按普通设备级查询交业务方处理，
+        // 避免把没有下级的普通查询误判为级联。
+        if (cascade != null && cascade.hasOnlineLower()
+                && io.github.rurulalanana.gb28181.sip.constant.CmdType.CATALOG.value().equals(msg.getCmdType())
+                && "Query".equals(msg.getRootName())) {
+            cascade.queryCascadedCatalog(msg.getDeviceId(), msg.getSn(), cascadeTimeoutMs);
+            return;
+        }
+
         // 其余交由调用方处理
         Boolean handled = safeDispatch(msgEvent);
         if (handled == null && msg.cmdTypeEnum() == null) {
             callback.onUnknownCommand(msgEvent);
         }
+    }
+
+    /**
+     * 构造 REGISTER 应答（标准 9.10.3）。
+     *
+     * <p>设备注册与下级平台注册共用；{@code expires <= 0} 表示注销应答，不带Expires 头。
+     */
+    private Response buildRegisterResponse(Request request, int expires) {
+        Response response = factory.buildResponse(Response.OK, request, null, null);
+        try {
+            // Date 头须为 RFC 1123 格式，否则协议栈解析报 "bad wkday"
+            response.addHeader(factory.headerFactory().createHeader(SipHeaders.DATE,
+                    java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME
+                            .format(java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC))));
+            response.addHeader(factory.headerFactory().createHeader(SipHeaders.SERVER, "gb28181-sip/1.0"));
+            response.addHeader(factory.headerFactory().createUserAgentHeader(
+                    java.util.Collections.singletonList("gb28181-sip")));
+            if (expires > 0) {
+                response.addHeader(factory.headerFactory().createExpiresHeader(
+                        expires > 0 ? expires : config.getRegisterExpires()));
+            }
+        } catch (Exception e) {
+            log.warn("构造 REGISTER 应答头失败: {}", e.getMessage());
+        }
+        return response;
     }
 
     /** 提取心跳 {@code <Info>} 中的故障设备编码。 */
@@ -311,7 +403,26 @@ public class GbSipListener implements SipListener {
 
     private void handleInvite(RequestEvent event, Request request) {
         // 模块不处理流媒体，也不自动应答 INVITE（标准注 17 由设备/调用方决定 488/486）
-        callback.onInvite(buildInviteEvent(request, event));
+        InviteEvent invite = buildInviteEvent(request, event);
+        callback.onInvite(invite);
+
+        // ---- 级联点播：上级对下级设备点播时，流转发交业务方处理 ----
+        if (cascade != null && invite.getPeer() != null
+                && cascade.getRegistry().get(invite.getPeer().getDeviceId()) != null) {
+            String platformId = invite.getPeer().getDeviceId();
+            io.github.rurulalanana.gb28181.sip.cascade.CascadeEvents.CascadeInvite cascadeInvite =
+                    io.github.rurulalanana.gb28181.sip.cascade.CascadeEvents.CascadeInvite.builder()
+                            .platformId(platformId)
+                            .ssrc(invite.getSdp() == null ? null : invite.getSdp().getSsrc())
+                            .playback(invite.isPlayback())
+                            .rawRequestEvent(event)
+                            .build();
+            try {
+                callback.onCascadeInvite(cascadeInvite);
+            } catch (Exception e) {
+                log.error("级联点播回调异常", e);
+            }
+        }
     }
 
     private void handleBye(RequestEvent event, Request request) {
@@ -385,6 +496,11 @@ public class GbSipListener implements SipListener {
             factory.addSubscriptionState(response, "active", granted);
         }
         send(event, response);
+
+        // ---- 级联订阅穿透：上级订阅本级目录时，同步向各在线下级发起订阅 ----
+        if (cascade != null && cascade.getRegistry().get(subEvent.getPeer().getDeviceId()) != null) {
+            cascade.subscribeCascade(subEvent.getPeer().getDeviceId(), eventName, granted);
+        }
     }
 
     private void handleNotify(RequestEvent event, Request request) {

@@ -1,5 +1,8 @@
 package io.github.rurulalanana.gb28181.sip;
 
+import io.github.rurulalanana.gb28181.sip.cascade.CascadeManager;
+import io.github.rurulalanana.gb28181.sip.cascade.CascadeRegistry;
+import io.github.rurulalanana.gb28181.sip.cascade.LocalCascadeRegistry;
 import io.github.rurulalanana.gb28181.sip.config.SipServerConfig;
 import io.github.rurulalanana.gb28181.sip.constant.ManscdpTypes;
 import io.github.rurulalanana.gb28181.sip.device.DeviceRegistry;
@@ -67,6 +70,10 @@ public class Gb28181SipServer implements AutoCloseable {
     @Getter
     private final SipCallback callback;
 
+    /** 级联管理器（国标级联，仅信令层）。 */
+    @Getter
+    private final CascadeManager cascade;
+
     private final CredentialProvider credentialProvider;
     private final String nodeId;
 
@@ -76,6 +83,7 @@ public class Gb28181SipServer implements AutoCloseable {
     volatile boolean running;
 
     Gb28181SipServer(SipServerConfig config, SipCallback callback, DeviceRegistry registry,
+                     CascadeRegistry cascadeRegistry,
                      CredentialProvider credentialProvider, String nodeId) {
         this.config = config;
         this.callback = callback == null ? new SipCallback() {
@@ -84,6 +92,12 @@ public class Gb28181SipServer implements AutoCloseable {
         this.credentialProvider = credentialProvider;
         this.nodeId = nodeId;
         this.factory = new SipMessageFactory(SipFactory.getInstance());
+        this.cascade = new CascadeManager(
+                config.getServerId(),
+                cascadeRegistry == null ? new LocalCascadeRegistry() : cascadeRegistry,
+                client(),
+                this.callback,
+                config.getOfflineTimeout());
     }
 
     // ==================== 生命周期 ====================
@@ -111,7 +125,7 @@ public class Gb28181SipServer implements AutoCloseable {
             // jain-sip 1.2.344 不再自动创建 ServerTransaction，需由监听器显式创建后才能应答
             sipProvider.addSipListener(new GbSipListener(
                     config, new SipMessageFactory(sipFactory), callback, registry,
-                    credentialProvider, sipProvider));
+                    credentialProvider, sipProvider, cascade));
             sipStack.start();
 
             running = true;
@@ -211,6 +225,7 @@ public class Gb28181SipServer implements AutoCloseable {
         private int cleanupInterval = 60;
         private SipCallback callback;
         private DeviceRegistry registry;
+        private CascadeRegistry cascadeRegistry;
         private CredentialProvider credentialProvider;
         private String nodeId;
 
@@ -292,6 +307,16 @@ public class Gb28181SipServer implements AutoCloseable {
             return this;
         }
 
+        /**
+         * 下级平台注册表（国标级联）。
+         *
+         * <p>不设置则使用内存实现。集群场景可传 Redis 实现以共享拓扑。
+         */
+        public Builder cascadeRegistry(CascadeRegistry cascadeRegistry) {
+            this.cascadeRegistry = cascadeRegistry;
+            return this;
+        }
+
         /** 凭据提供者；不设置则不校验注册认证。 */
         public Builder credentialProvider(CredentialProvider provider) {
             this.credentialProvider = provider;
@@ -341,7 +366,7 @@ public class Gb28181SipServer implements AutoCloseable {
                     .transactionTimeoutMillis(transactionTimeoutMillis)
                     .cleanupInterval(cleanupInterval)
                     .build();
-            return new Gb28181SipServer(cfg, callback, registry, credentialProvider, id);
+            return new Gb28181SipServer(cfg, callback, registry, cascadeRegistry, credentialProvider, id);
         }
 
         /** 构建并启动。 */
