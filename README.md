@@ -292,31 +292,21 @@ mvn clean test
 # 打包含源码与 javadoc
 mvn clean package
 
-# 发布到 GitHub Packages（需 settings.xml 配置 github server）
-mvn deploy -Pgithub
+# 发布到 Sonatype Central（Maven 中央仓库，需 GPG 签名）
+mvn clean deploy -Pcentral
 
-# 发布到 Maven Central（需 Sonatype 账号 + GPG 签名）
-mvn deploy -Pcentral
+# 备用通道
+mvn deploy -Pgithub       # GitHub Packages
+mvn deploy -Paliyun-rds   # 阿里云效 Packages
 ```
 
-`~/.m2/settings.xml` 示例：
+**Central 发布需先完成两件事**：
 
-```xml
-<settings>
-  <servers>
-    <server>
-      <id>github</id>
-      <username>你的GitHub用户名</username>
-      <password>你的GitHub PAT（需 packages:write 权限）</password>
-    </server>
-    <server>
-      <id>central</id>
-      <username>你的Sonatype用户名</username>
-      <password>你的Sonatype密码</password>
-    </server>
-  </servers>
-</settings>
-```
+1. 在 [central.sonatype.com](https://central.sonatype.com/) 绑定 namespace
+   `io.github.rurulalanana`
+2. 生成 GPG 密钥并上传公钥到 keyserver（中央仓库强制要求签名）
+
+完整步骤见 **[DEPLOY.md](DEPLOY.md)**。
 
 ---
 

@@ -190,10 +190,54 @@
           </execution>
         </executions>
       </plugin>
+    <!-- 发布到 Sonatype Central：mvn deploy -Pcentral
+           需 settings.xml 配置 central 凭据 + GPG 签名密钥 -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-gpg-plugin</artifactId>
+        <version>3.1.4</version>
+        <configuration>
+          <gpgArguments>
+            <arg>--pinentry-mode</arg>
+            <arg>loopback</arg>
+          </gpgArguments>
+        </configuration>
+        <executions>
+          <execution>
+            <id>sign-artifacts</id>
+            <phase>verify</phase>
+            <goals><goal>sign</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- Central Portal 上传（替代旧的 nexus-staging）-->
+      <plugin>
+        <groupId>org.sonatype.central</groupId>
+        <artifactId>central-publishing-maven-plugin</artifactId>
+        <version>0.5.0</version>
+        <extensions>true</extensions>
+        <configuration>
+          <publishingServerId>central</publishingServerId>
+          <autoPublish>false</autoPublish>
+        </configuration>
+      </plugin>
     </plugins>
   </build>
 
   <profiles>
+    <!-- 阿里云效 Packages：mvn deploy -Paliyun-rds -->
+    <profile>
+      <id>aliyun-rds</id>
+      <distributionManagement>
+        <repository>
+          <id>aliyun-rds</id>
+          <name>阿里云效 Maven 仓库</name>
+          <url>https://packages.aliyun.com/maven/repository/</url>
+        </repository>
+      </distributionManagement>
+    </profile>
+
     <!-- GitHub Packages：mvn deploy -Pgithub -->
     <profile>
       <id>github</id>
@@ -206,16 +250,21 @@
       </distributionManagement>
     </profile>
 
-    <!-- Maven Central：mvn deploy -Pcentral（需 GPG 签名 + settings.xml 凭据） -->
+    <!-- Maven Central（Sonatype Central Portal）：mvn deploy -Pcentral
+         中央仓库强制要求 GPG 签名与完整 POM 元数据 -->
     <profile>
       <id>central</id>
       <distributionManagement>
         <repository>
           <id>central</id>
           <name>Maven Central</name>
-          <url>https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/</url>
+          <url>https://central.sonatype.com/api/v1/publisher</url>
         </repository>
       </distributionManagement>
+      <properties>
+        <gpg.executable>gpg</gpg.executable>
+        <gpg.passphrase>${env.GPG_PASSPHRASE}</gpg.passphrase>
+      </properties>
     </profile>
   </profiles>
 </project>
