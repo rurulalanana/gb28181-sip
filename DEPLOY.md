@@ -200,9 +200,42 @@ where gpg   # 确认路径
 gpg --version
 ```
 
-**Q: `gpg: signing failed: Inappropriate ioctl for device`**
+**Q: `gpg: signing failed` / 任何 gpg 操作永久挂起（lockfile 死循环）**
 
-命令行签名时的终端问题，加 `--pinentry-mode loopback`（POM 已配置）。
+Git for Windows 自带的 GnuPG（`/usr/bin/gpg`）**缺少 `rng.exe`**，
+且 `gpg-agent.exe` 无法启动。表现为：
+
+```
+gpg: removing stale lockfile (created by NNN)
+gpg: removing stale lockfile (created by NNN)   ← 无限重复直到超时
+```
+
+`gpg --list-keys`、`--gen-key`、`--detach-sign` 全部受影响。
+
+**解决**：安装 [Gpg4win](https://gpg4win.org/)，并把它的 `gpg.exe` 置于 `PATH` 最前面：
+
+```bash
+where gpg    # 确认不再指向 Git\usr\bin
+gpg --version
+gpg --list-secret-keys   # 应立即返回
+```
+
+> ⚠️ 无签名上传（`publishingType=UPLOAD_UNSIGNED`）对普通账号不可用，
+> 会返回 500 InternalServerError。中央仓库的签名要求无法绕过。
+
+**Q: Central 报 `Missing md5/sha1 checksum` 或 `Missing signature`**
+
+手动构造 bundle 时必须包含：
+
+- 每个构件对应 `.md5`、`.sha1`、`.asc` 文件
+- 根目录 `manifest.json`，列出每个文件的 `filename`/`md5`/`sha1`/`sha256`/`sha512`
+- `manifest.json` 的 `signed` 字段（true 表示已签名）
+
+且 zip 内**不能有 `META-INF`**（`jar cf` 命令会自动添加，会导致
+`Bundle has content that does NOT have a .pom file: META-INF`），
+请用 Python `zipfile` 或 `mvn deploy` 生成。
+
+**Q: GitHub 推送报 403**
 
 **Q: 上传报 401/403**
 
