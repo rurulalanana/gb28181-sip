@@ -400,9 +400,19 @@ public class Gb28181SipClient implements AutoCloseable {
             throw new IllegalStateException("SIP 服务未启动，无法发送请求");
         }
         try {
-            ClientTransaction transaction =
-                    (ClientTransaction) provider.getNewClientTransaction(request);
-            transaction.sendRequest();
+            // RFC 3261 §13.1.1.4：ACK 不创建事务，须经 Provider 直接发送
+            // （getNewClientTransaction 对 ACK 会抛 SipException）
+            if (Request.ACK.equalsIgnoreCase(request.getMethod())) {
+                if (!(provider instanceof gov.nist.javax.sip.SipProviderImpl)) {
+                    throw new SipBuildException("ACK 发送需要 SipProviderImpl，当前: "
+                            + provider.getClass().getName());
+                }
+                ((gov.nist.javax.sip.SipProviderImpl) provider).sendRequest(request);
+            } else {
+                ClientTransaction transaction =
+                        (ClientTransaction) provider.getNewClientTransaction(request);
+                transaction.sendRequest();
+            }
             log.debug("已发送 {} -> {} (callId={})",
                     request.getMethod(), peer.getAddress(), callIdOf(request));
         } catch (Exception e) {

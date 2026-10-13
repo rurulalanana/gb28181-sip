@@ -149,8 +149,15 @@ public final class SipMessageFactory {
             ContentTypeHeader ct = contentType(contentType != null ? contentType
                     : "application/octet-stream");
 
-            // Via 由协议栈在发送时自动补全，此处传空列表
-            List<ViaHeader> via = Collections.<ViaHeader>emptyList();
+            // Via 必须显式构造并使用「对外通告地址」：
+            // 传空列表时协议栈按监听地址（常为 0.0.0.0 / [::]）补全，
+            // 真实设备收到形如 "Via: SIP/2.0/UDP [0:0:0:0:0:0:0:0]:5060"
+            // 的 Via 会直接丢弃 INVITE，表现为点播无响应。
+            // fromUri 已带通告地址，故直接复用。
+            String viaHost = fromUri.getHost() != null ? fromUri.getHost() : "127.0.0.1";
+            int viaPort = fromUri.getPort() != -1 ? fromUri.getPort() : 5060;
+            List<ViaHeader> via = Collections.singletonList(
+                    headerFactory.createViaHeader(viaHost, viaPort, "UDP", newTag()));
             // jain-sip 要求 body 参数非 null（无消息体时传空串而非 null），
             // 否则 createRequest 抛 NPE("Null parameters")
             String bodyArg = body == null ? "" : body;
