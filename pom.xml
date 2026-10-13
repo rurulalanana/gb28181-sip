@@ -6,7 +6,7 @@
 
   <groupId>io.github.rurulalanana</groupId>
   <artifactId>gb28181-sip</artifactId>
-  <version>1.0.0</version>
+  <version>1.0.2</version>
   <packaging>jar</packaging>
 
   <name>gb28181-sip</name>
@@ -195,7 +195,7 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-gpg-plugin</artifactId>
-        <version>3.1.4</version>
+        <version>3.2.8</version>
         <configuration>
           <gpgArguments>
             <arg>--pinentry-mode</arg>

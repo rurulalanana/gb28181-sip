@@ -208,6 +208,21 @@ public final class SipMessageFactory {
     }
 
     /**
+     * 构造会话内 {@code INFO} 请求（标准附录 D 回放控制，RFC 2976）。
+     *
+     * <p>与 {@link #buildInvite} 不同：INFO 必须复用 INVITE 的 Call-ID 与对端 tag，
+     * 属于同一对话框内的请求，否则设备无法把控制指令关联到正在进行的回放会话。
+     *
+     * @param sdp 控制指令 SDP（{@code u=} 携带 PLAY/PAUSE/SEEK 等命令，{@code a=Scale:} 携带倍速）
+     */
+    public Request buildInfo(SipURI requestUri, SipURI fromUri, String fromTag,
+                             SipURI toUri, String toTag, String callId, long cSeq,
+                             String sdp) {
+        return buildRequest("INFO", requestUri, fromUri, fromTag,
+                toUri, toTag, callId, cSeq, SDP_CONTENT_TYPE, sdp);
+    }
+
+    /**
      * 构造 SUBSCRIBE 请求（标准 9.11，RFC 6665）。
      *
      * @param eventName 事件名，如 {@code Catalog}
@@ -280,6 +295,26 @@ public final class SipMessageFactory {
             response.addHeader(headerFactory.createToHeader(to.getAddress(), newTag()));
         }
         return response;
+    }
+
+    /**
+     * 为 INVITE 的 2xx 应答补充 Contact 头。
+     *
+     * <p>RFC 3261 §13.3.1.4：{@code 200 OK} 应答 INVITE 时<b>必须</b>携带 Contact 头
+     * （对端据此发送 ACK / BYE）；jain-sip 对缺失 Contact 的 INVITE 2xx 应答会直接抛
+     * {@code IllegalTransactionStateException} 拒绝发送。
+     */
+    public Response withContact(Response response, String userId, String host, int port) {
+        try {
+            if (response.getHeader(ContactHeader.NAME) != null) {
+                return response;
+            }
+            Address address = addressFactory.createAddress(createUri(userId, host, port));
+            response.setHeader(headerFactory.createContactHeader(address));
+            return response;
+        } catch (Exception e) {
+            throw new SipBuildException("添加 Contact 头失败", e);
+        }
     }
 
     /** 构造 401 challenge（标准 9.1.2.1 b）。 */

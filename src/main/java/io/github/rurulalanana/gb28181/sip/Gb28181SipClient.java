@@ -19,7 +19,9 @@ import javax.sip.ServerTransaction;
 import javax.sip.SipProvider;
 import javax.sip.TimeoutEvent;
 import javax.sip.address.SipURI;
+import javax.sip.header.FromHeader;
 import javax.sip.header.Header;
+import javax.sip.header.ToHeader;
 import javax.sip.message.Request;
 import javax.sip.message.Response;
 import java.util.Map;
@@ -49,6 +51,8 @@ public class Gb28181SipClient {
     private final Map<String, CountDownLatch> pending = new ConcurrentHashMap<>();
     /** Call-ID → 收到的首个最终响应。 */
     private final Map<String, Response> responses = new ConcurrentHashMap<>();
+    /** Call-ID → 对话框内下一个 CSeq（INVITE/ACK 为 1，其后 INFO/BYE 递增）。 */
+    private final Map<String, java.util.concurrent.atomic.AtomicLong> dialogCSeq = new ConcurrentHashMap<>();
 
     Gb28181SipClient(Gb28181SipServer server) {
         this.server = server;
@@ -264,7 +268,45 @@ public class Gb28181SipClient {
                 serverUri(deviceId, configHost(), configPort()),
                 SipMessageFactory.newTag(),
                 factory.createUri(serverId(), peer.getIp(), peer.getPort()),
-                toTag, callId, 2L, null, null);
+                toTag, callId, nextDialogCSeq(callId), null, null);
+        send(request, peer);
+    }
+
+    // ==================== 回放控制（标准附录 D）====================
+
+    /**
+     * 会话内 {@code INFO} 回放控制（标准附录 D，RFC 2976）。
+     *
+     * <p>用于播放、暂停、停止、跳转与倍速控制。INFO 必须复用回放 INVITE 的
+     * Call-ID 与对端 tag（同一对话框），否则设备无法把指令关联到正在进行的回放会话。
+     *
+     * @param deviceId 设备/通道编码
+     * @param callId   回放 INVITE 的 Call-ID（{@link #invitePlayback} / {@link #invite} 返回值）
+     * @param sdp      控制指令 SDP：{@code u=} 放命令（PLAY/PAUSE/SEEK/PLAY_SPEED），
+     *                 {@code t=} 放时间范围，{@code a=Scale:} 放倍速
+     */
+    public void info(String deviceId, String callId, SdpMessage sdp) {
+        SipPeer peer = requireSession(deviceId);
+        Response ok = responses.get(callId);
+        String fromTag = SipMessageFactory.newTag();
+        String toTag = null;
+        if (ok != null) {
+            FromHeader from = (FromHeader) ok.getHeader(SipHeaders.FROM);
+            ToHeader to = (ToHeader) ok.getHeader(SipHeaders.TO);
+            if (from != null && from.getTag() != null) {
+                toTag = from.getTag();
+            }
+            if (to != null && to.getTag() != null) {
+                fromTag = to.getTag();
+            }
+        }
+        Request request = factory.buildInfo(
+                requestUri(peer, deviceId),
+                serverUri(deviceId, configHost(), configPort()),
+                fromTag,
+                factory.createUri(serverId(), peer.getIp(), peer.getPort()),
+                toTag, callId, nextDialogCSeq(callId),
+                sdp == null ? null : sdp.toText());
         send(request, peer);
     }
 
@@ -281,10 +323,15 @@ public class Gb28181SipClient {
     public void respondInvite(RequestEvent requestEvent, SdpMessage sdp) {
         Response response = factory.buildResponse(Response.OK, requestEvent.getRequest(),
                 SipMessageFactory.SDP_CONTENT_TYPE, sdp == null ? null : sdp.toText());
+        // RFC 3261 §13.3.1.4：INVITE 的 200 OK 必须携带 Contact 头
+        response = factory.withContact(response, server.getConfig().getServerId(),
+                contactHost(), server.getConfig().getPort());
         try {
-            ServerTransaction transaction = requestEvent.getServerTransaction();
+            ServerTransaction transaction = serverTransaction(requestEvent);
             if (transaction != null) {
                 transaction.sendResponse(response);
+            } else {
+                log.warn("无服务端事务，丢弃 200 OK 应答（SIP 服务未启动？）");
             }
         } catch (Exception e) {
             throw new SipBuildException("应答 INVITE 失败", e);
@@ -302,12 +349,53 @@ public class Gb28181SipClient {
         Response response = factory.buildResponse(statusCode,
                 requestEvent.getRequest(), null, null);
         try {
-            ServerTransaction transaction = requestEvent.getServerTransaction();
+            ServerTransaction transaction = serverTransaction(requestEvent);
             if (transaction != null) {
                 transaction.sendResponse(response);
+            } else {
+                log.warn("无服务端事务，丢弃 {} 拒绝应答（SIP 服务未启动？）", statusCode);
             }
         } catch (Exception e) {
             throw new SipBuildException("拒绝 INVITE 失败", e);
+        }
+    }
+
+    /**
+     * 取得（必要时创建）服务端事务。
+     *
+     * <p>jain-sip 1.2.344 不再像旧版那样在投递 {@link RequestEvent} 前自动创建
+     * ServerTransaction，{@code event.getServerTransaction()} 恒为 {@code null}，
+     * 直接调用会导致应答被静默丢弃。此处与 {@code GbSipListener} 保持同一模式：
+     * 优先取现有事务，否则经 {@link SipProvider#getNewServerTransaction} 显式创建。
+     */
+    private ServerTransaction serverTransaction(RequestEvent requestEvent) {
+        ServerTransaction existing = requestEvent.getServerTransaction();
+        if (existing != null) {
+            return existing;
+        }
+        SipProvider provider = server.sipProvider();
+        if (provider == null) {
+            return null;
+        }
+        try {
+            return provider.getNewServerTransaction(requestEvent.getRequest());
+        } catch (Exception e) {
+            throw new SipBuildException("创建服务端事务失败", e);
+        }
+    }
+
+    /**
+     * Contact 头主机：优先监听地址；通配绑定（空 / 0.0.0.0）时取本机地址，失败退 127.0.0.1。
+     */
+    private String contactHost() {
+        String host = server.getConfig().getHost();
+        if (StringUtils.isNotBlank(host) && !"0.0.0.0".equals(host)) {
+            return host;
+        }
+        try {
+            return java.net.InetAddress.getLocalHost().getHostAddress();
+        } catch (Exception e) {
+            return "127.0.0.1";
         }
     }
 
@@ -328,6 +416,12 @@ public class Gb28181SipClient {
             log.error("发送 SIP 请求失败: {}", request.getMethod(), e);
             throw new SipBuildException("发送 SIP 请求失败: " + request.getMethod(), e);
         }
+    }
+
+    /** 对话框内下一个 CSeq：INVITE/ACK 占用 1，INFO/BYE 从 2 起递增。 */
+    private long nextDialogCSeq(String callId) {
+        return dialogCSeq.computeIfAbsent(callId,
+                k -> new java.util.concurrent.atomic.AtomicLong(1)).incrementAndGet();
     }
 
     private SipURI requestUri(SipPeer peer, String deviceId) {
