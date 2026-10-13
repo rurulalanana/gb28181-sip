@@ -241,7 +241,6 @@ public class SdpMessage {
         if (notEmpty(connection)) line(sb, "c=", connection);
         if (notEmpty(time)) line(sb, "t=", time);
         if (notEmpty(bandwidth)) line(sb, "b=", bandwidth);
-        if (notEmpty(ssrc)) line(sb, "y=", ssrc);
         if (notEmpty(mediaFormat)) line(sb, "f=", mediaFormat);
         sb.append("m=").append(mediaName).append(' ').append(mediaPort)
                 .append(' ').append(mediaProto).append(' ').append(payloadType).append("\r\n");
@@ -252,6 +251,8 @@ public class SdpMessage {
                 line(sb, "a=", a);
             }
         }
+        // y= 放在末尾：对照 WVP-GB28181-pro 的实际报文顺序（m= → a= → y=）
+        if (notEmpty(ssrc)) line(sb, "y=", ssrc);
         return sb.toString();
     }
 
