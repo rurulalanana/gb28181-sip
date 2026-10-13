@@ -42,7 +42,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>SN 由内部原子计数器生成并自动回绕到标准要求的 [1, 9999]。
  */
 @Slf4j
-public class Gb28181SipClient {
+public class Gb28181SipClient implements AutoCloseable {
 
     private final Gb28181SipServer server;
     private final SipMessageFactory factory;
@@ -61,6 +61,7 @@ public class Gb28181SipClient {
     }
 
     /** 解除注册，避免内存泄漏。 */
+    @Override
     public void close() {
         io.github.rurulalanana.gb28181.sip.internal.Gb28181SipClientBridge.unregister(this);
     }
@@ -385,18 +386,10 @@ public class Gb28181SipClient {
     }
 
     /**
-     * Contact 头主机：优先监听地址；通配绑定（空 / 0.0.0.0）时取本机地址，失败退 127.0.0.1。
+     * Contact 头主机。与 {@link #configHost()} 同源，保证应答与请求里的地址一致。
      */
     private String contactHost() {
-        String host = server.getConfig().getHost();
-        if (StringUtils.isNotBlank(host) && !"0.0.0.0".equals(host)) {
-            return host;
-        }
-        try {
-            return java.net.InetAddress.getLocalHost().getHostAddress();
-        } catch (Exception e) {
-            return "127.0.0.1";
-        }
+        return configHost();
     }
 
     // ==================== 内部 ====================
@@ -436,9 +429,57 @@ public class Gb28181SipClient {
         return server.config().getServerId();
     }
 
+    /**
+     * 本平台对外可达的地址，写入 INVITE / MESSAGE 的 From 与 Contact。
+     *
+     * <p>解析顺序：
+     * <ol>
+     *   <li>配置的 {@code advertisedHost}（多网卡 / NAT 场景显式指定，最可靠）；</li>
+     *   <li>监听地址 {@code host}（当它不是 {@code 0.0.0.0}/{@code ::} 时）；</li>
+     *   <li>本机第一个非回环 IPv4 地址；</li>
+     *   <li>{@code 127.0.0.1} 兜底。</li>
+     * </ol>
+     *
+     * <p><b>注意</b>：绝不能把 {@code 0.0.0.0} 或默认的 {@code 127.0.0.1} 写进
+     * 发给设备的报文——设备会据 Contact 回包，指向回环地址时它无法送达，
+     * 表现为「平台发了 INVITE 但设备不响应」的点播失败。
+     */
     private String configHost() {
+        String advertised = server.config().getAdvertisedHost();
+        if (StringUtils.isNotBlank(advertised)) {
+            return advertised;
+        }
         String h = server.config().getHost();
-        return StringUtils.isBlank(h) || "0.0.0.0".equals(h) ? "127.0.0.1" : h;
+        if (StringUtils.isNotBlank(h) && !"0.0.0.0".equals(h) && !"::".equals(h)
+                && !"::0".equals(h)) {
+            return h;
+        }
+        String detected = localAddress();
+        return detected != null ? detected : "127.0.0.1";
+    }
+
+    /** 取本机第一个非回环 IPv4；取不到返回 {@code null}。 */
+    private static String localAddress() {
+        try {
+            java.util.Enumeration<java.net.NetworkInterface> nics =
+                    java.net.NetworkInterface.getNetworkInterfaces();
+            while (nics != null && nics.hasMoreElements()) {
+                java.net.NetworkInterface nic = nics.nextElement();
+                if (nic.isLoopback() || !nic.isUp()) {
+                    continue;
+                }
+                java.util.Enumeration<java.net.InetAddress> addrs = nic.getInetAddresses();
+                while (addrs.hasMoreElements()) {
+                    java.net.InetAddress addr = addrs.nextElement();
+                    if (addr instanceof java.net.Inet4Address && !addr.isLoopbackAddress()) {
+                        return addr.getHostAddress();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.debug("探测本机地址失败: {}", e.toString());
+        }
+        return null;
     }
 
     private int configPort() {

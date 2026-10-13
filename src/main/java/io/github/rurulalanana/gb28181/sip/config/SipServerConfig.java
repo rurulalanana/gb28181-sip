@@ -23,6 +23,17 @@ public class SipServerConfig {
     /** 监听 IP；{@code null} 或 {@code 0.0.0.0} 表示所有网卡。 */
     private final String host;
 
+    /**
+     * 对外通告的地址（写入 INVITE / MESSAGE 的 From、Contact）。
+     *
+     * <p>{@link #host} 是监听地址（常为 {@code 0.0.0.0}），不能出现在发给对端的
+     * 报文里：设备收到 {@code Contact: <sip:平台@127.0.0.1>} 后无法回包，会直接丢弃，
+     * 表现为点播无响应。多网卡或 NAT 场景下监听地址与可通告地址也不同，
+     * 因此单列本项。为空时退化为「按注册来源地址推断」。
+     */
+    @Builder.Default
+    private final String advertisedHost = null;
+
     /** 监听端口。 */
     private final int port;
 

@@ -214,6 +214,14 @@ public class Gb28181SipServer implements AutoCloseable {
 
         private String serverId = "34020000002000000001";
         private String host;
+
+        /**
+         * 对外通告地址（写入 From / Contact）。为空时自动推断本机非回环地址。
+         *
+         * <p>NAT 或多网卡场景下监听地址（{@code 0.0.0.0}）不能直接发给设备，
+         * 应显式指定设备可达的本机 IP。
+         */
+        private String advertisedHost;
         private int port = 5060;
         private String transport = "UDP";
         private int registerExpires = ManscdpTypes.DEFAULT_REGISTER_EXPIRES;
@@ -238,6 +246,17 @@ public class Gb28181SipServer implements AutoCloseable {
         /** 监听 IP，默认全部网卡。 */
         public Builder host(String host) {
             this.host = host;
+            return this;
+        }
+
+        /**
+         * 设置对外通告地址（From / Contact 中使用）。
+         *
+         * <p>监听地址为 {@code 0.0.0.0} 或平台在 NAT 后时必须显式设置，
+         * 否则设备收到回环地址的 Contact 无法回包，表现为点播无响应。
+         */
+        public Builder advertisedHost(String advertisedHost) {
+            this.advertisedHost = advertisedHost;
             return this;
         }
 
@@ -356,6 +375,7 @@ public class Gb28181SipServer implements AutoCloseable {
                             ? io.github.rurulalanana.gb28181.sip.constant.GbId.domainOf(serverId)
                             : StringUtils.left(serverId, 10))
                     .host(host)
+                    .advertisedHost(advertisedHost)
                     .port(port)
                     .transport(transport)
                     .registerExpires(registerExpires)

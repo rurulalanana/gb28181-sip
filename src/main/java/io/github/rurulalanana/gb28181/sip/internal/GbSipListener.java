@@ -93,7 +93,12 @@ public class GbSipListener implements SipListener {
             if (existing != null) {
                 return existing;
             }
-            return provider.getNewServerTransaction(event.getRequest());
+            Request request = event.getRequest();
+            // jain-sip 的 getNewServerTransaction 要求请求带 Max-Forwards（RFC 3261 §8.1.1.6
+            // 规定每跳必带），缺失时抛 "Missing a required header : Max-Forwards"，
+            // 导致应答被静默丢弃 —— 部分设备会因收不到确认而不推流。
+            factory.ensureMaxForwards(request);
+            return provider.getNewServerTransaction(request);
         } catch (Exception e) {
             log.warn("创建服务端事务失败: {}", e.getMessage());
             return null;

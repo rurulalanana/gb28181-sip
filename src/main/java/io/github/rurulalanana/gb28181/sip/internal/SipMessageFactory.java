@@ -208,6 +208,28 @@ public final class SipMessageFactory {
     }
 
     /**
+     * 补齐 {@code Max-Forwards} 头（RFC 3261 §8.1.1.6 要求逐跳携带）。
+     *
+     * <p>jain-sip 的 {@code getNewServerTransaction} 会校验该头，缺失时抛
+     * {@code Missing a required header : Max-Forwards}，导致应答被静默丢弃。
+     * 部分国标设备收不到应答确认就不推流，因此必须补齐。
+     *
+     * @return 是否补齐（原本已存在则返回 false）
+     */
+    public boolean ensureMaxForwards(Request request) {
+        if (request.getHeader(SipHeaders.MAX_FORWARDS) != null) {
+            return false;
+        }
+        try {
+            request.addHeader(headerFactory.createMaxForwardsHeader(70));
+            return true;
+        } catch (javax.sip.InvalidArgumentException e) {
+            log.warn("补齐 Max-Forwards 失败: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
      * 构造会话内 {@code INFO} 请求（标准附录 D 回放控制，RFC 2976）。
      *
      * <p>与 {@link #buildInvite} 不同：INFO 必须复用 INVITE 的 Call-ID 与对端 tag，
