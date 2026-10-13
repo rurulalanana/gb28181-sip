@@ -214,8 +214,8 @@
       <!-- Central Portal 上传（替代旧的 nexus-staging）-->
       <plugin>
         <groupId>org.sonatype.central</groupId>
-        <artifactId>central-publishing-maven-plugin</artifactId>
-        <version>0.5.0</version>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <version>0.11.0</version>
         <extensions>true</extensions>
         <configuration>
           <publishingServerId>central</publishingServerId>
