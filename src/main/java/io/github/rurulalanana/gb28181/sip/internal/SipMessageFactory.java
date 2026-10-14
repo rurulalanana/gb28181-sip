@@ -156,8 +156,21 @@ public final class SipMessageFactory {
             // fromUri 已带通告地址，故直接复用。
             String viaHost = fromUri.getHost() != null ? fromUri.getHost() : "127.0.0.1";
             int viaPort = fromUri.getPort() != -1 ? fromUri.getPort() : 5060;
-            List<ViaHeader> via = Collections.singletonList(
-                    headerFactory.createViaHeader(viaHost, viaPort, "UDP", newTag()));
+            ViaHeader viaHeader = headerFactory.createViaHeader(viaHost, viaPort, "UDP", newTag());
+            // rport（RFC 3581）：要求对端把响应发回<b>实际收到报文的源地址</b>，
+            // 而不是 Via 里写的地址。国标设备普遍要求带此参数，
+            // 且经 NAT / frp 端口映射时尤为重要：
+            // 映射后平台看到的设备源端口（如 frpc 在本地开的临时端口）
+            // 与设备自报的 5060 不同，不带 rport 时响应会发到错误端口而丢失，
+            // 表现为「INVITE 已发出但设备无响应」。
+            // 注意：从无参构造的 Via 上调用 setRPort 才会真正写入 "rport"，
+            // 所以此处单独构造而非复用上面的临时变量。
+            try {
+                viaHeader.setRPort();
+            } catch (Exception ignore) {
+                // 部分实现不支持 rport，忽略即可（不影响基础功能）
+            }
+            List<ViaHeader> via = Collections.singletonList(viaHeader);
             // jain-sip 要求 body 参数非 null（无消息体时传空串而非 null），
             // 否则 createRequest 抛 NPE("Null parameters")
             String bodyArg = body == null ? "" : body;

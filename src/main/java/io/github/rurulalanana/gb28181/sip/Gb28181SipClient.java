@@ -84,7 +84,7 @@ public class Gb28181SipClient implements AutoCloseable {
         Request request = factory.buildMessage(
                 requestUri(peer, deviceId),
                 serverUri(deviceId, configHost(), configPort()),
-                factory.createUri(serverId(), peer.getIp(), peer.getPort()),
+                factory.createUri(deviceId, peer.getIp(), peer.getPort()),
                 xml);
         send(request, peer);
     }
@@ -209,31 +209,81 @@ public class Gb28181SipClient implements AutoCloseable {
      * {@link io.github.rurulalanana.gb28181.sip.event.SipCallback#onRawResponse} 中启动拉流，
      * 并调用 {@link #ackInvite} 回 ACK 完成会话建立。
      *
-     * @param sdp  SDP 描述（{@code s=Play}，需带 {@code y=} SSRC 与 {@code f=}）
+     * <p>通道编码与设备编码相同的场景（直连摄像机、设备自身即一路通道）用这个重载；
+     * 下挂子通道必须用 {@link #invitePlay(String, String, SdpMessage)}。
+     *
+     * @param sdp SDP 描述（{@code s=Play}，需带 {@code y=} SSRC 与 {@code f=}）
      */
     public String invitePlay(String deviceId, SdpMessage sdp) {
-        return invite(deviceId, sdp, subjectFor(deviceId, "Play"));
+        return invitePlay(deviceId, deviceId, sdp);
+    }
+
+    /**
+     * 发起实时点播 {@code INVITE}（标准 9.2），显式指定被点播的通道。
+     *
+     * <p><b>为什么必须区分 deviceId 与 channelId</b>：标准 9.2 规定 INVITE 的
+     * Request-URI 与 To 头域填<b>被点播的通道编码</b>（不是设备编码），
+     * {@code Subject} 填 {@code <通道编码>:<SSRC>,<平台编码>:0}。
+     * 设备/下级平台据此在自己管辖的通道列表里定位目标：
+     * <ul>
+     *   <li>填<b>通道</b>编码 → 命中，正常回 200 OK 并推流；</li>
+     *   <li>填<b>设备</b>编码 → 设备在自己的通道列表里找不到这个"通道"，
+     *       直接丢弃或回 404，表现为「INVITE 已发出但设备毫无响应、点播失败」。</li>
+     * </ul>
+     * 模拟器类设备（收到任何 INVITE 就推流）不会暴露该问题，
+     * 只有 LiveGBS / NVR 这类真实实现会严格校验，因此必须按标准填。
+     *
+     * <p>另有一层隐蔽风险：若设备注册时用的编码恰好等于本级平台编码，
+     * 把设备编码同时写进 From 与 To 会构成「自环」报文，对端直接静默丢弃。
+     * 填通道编码后 From（平台）与 To（通道）天然不同，该问题一并消除。
+     *
+     * @param deviceId  设备编码（SIP 寻址用：据此从注册表取对端 IP/端口）
+     * @param channelId 通道编码（写入 Request-URI / To / Subject）
+     */
+    public String invitePlay(String deviceId, String channelId, SdpMessage sdp) {
+        return invite(deviceId, channelId, sdp, null);
     }
 
     /** 发起历史回放 {@code INVITE}（标准 9.8）。 */
     public String invitePlayback(String deviceId, SdpMessage sdp) {
-        return invite(deviceId, sdp, subjectFor(deviceId, "Playback"));
+        return invitePlayback(deviceId, deviceId, sdp);
+    }
+
+    /** 发起历史回放 {@code INVITE}（标准 9.8），显式指定被回放的通道。 */
+    public String invitePlayback(String deviceId, String channelId, SdpMessage sdp) {
+        return invite(deviceId, channelId, sdp, null);
+    }
+
+    /**
+     * 发起 {@code INVITE}（兼容入口：通道编码与设备编码相同）。
+     *
+     * @param subject {@code Subject} 头域；为空时按标准自动生成
+     */
+    public String invite(String deviceId, SdpMessage sdp, String subject) {
+        return invite(deviceId, deviceId, sdp, subject);
     }
 
     /**
      * 发起 {@code INVITE}。
      *
-     * @param subject {@code Subject} 头域，标准 9.2 用于携带点播参数
+     * @param deviceId  设备编码（SIP 寻址用：据此从注册表取对端 IP/端口）
+     * @param channelId 通道编码（Request-URI / To 的 user 部分）；为空时退回设备编码
+     * @param subject   {@code Subject} 头域；为空时按标准生成
+     *                  {@code <通道编码>:<SSRC>,<平台编码>:0}
      * @return Call-ID，后续 {@link #ackInvite} / {@link #bye} 需复用
      */
-    public String invite(String deviceId, SdpMessage sdp, String subject) {
+    public String invite(String deviceId, String channelId, SdpMessage sdp, String subject) {
         SipPeer peer = requireSession(deviceId);
+        String target = StringUtils.isBlank(channelId) ? deviceId : channelId;
+        String subjectHeader = StringUtils.isNotBlank(subject)
+                ? subject
+                : subjectFor(target, sdp == null ? null : sdp.getSsrc());
         Request request = factory.buildInvite(
-                requestUri(peer, deviceId),
+                requestUri(peer, target),
                 serverUri(deviceId, configHost(), configPort()),
-                factory.createUri(serverId(), peer.getIp(), peer.getPort()),
+                factory.createUri(target, peer.getIp(), peer.getPort()),
                 sdp == null ? null : sdp.toText(),
-                subject);
+                subjectHeader);
         send(request, peer);
         return callIdOf(request);
     }
@@ -246,12 +296,24 @@ public class Gb28181SipClient implements AutoCloseable {
      * @param sdp    ACK 携带的 SDP，可 {@code null}
      */
     public void ackInvite(String deviceId, String callId, String toTag, String sdp) {
+        ackInvite(deviceId, deviceId, callId, toTag, sdp);
+    }
+
+    /**
+     * 发送 {@code ACK}，显式指定通道编码。
+     *
+     * <p>ACK 属于 INVITE 对话框（RFC 3261 §13.2.2.4）：Request-URI 与 To 必须
+     * 与原 INVITE 一致，即都用<b>通道编码</b>。只传设备编码会让部分设备
+     * 匹配不上对话框而丢弃 ACK，表现为「设备回了 200 OK 但不推流」。
+     */
+    public void ackInvite(String deviceId, String channelId, String callId, String toTag, String sdp) {
         SipPeer peer = requireSession(deviceId);
+        String target = StringUtils.isBlank(channelId) ? deviceId : channelId;
         Request ack = factory.buildRequest(Request.ACK,
-                requestUri(peer, deviceId),
+                requestUri(peer, target),
                 serverUri(deviceId, configHost(), configPort()),
                 SipMessageFactory.newTag(),
-                factory.createUri(serverId(), peer.getIp(), peer.getPort()),
+                factory.createUri(target, peer.getIp(), peer.getPort()),
                 toTag, callId, 1L,
                 sdp == null ? null : SipMessageFactory.SDP_CONTENT_TYPE, sdp);
         send(ack, peer);
@@ -263,12 +325,24 @@ public class Gb28181SipClient implements AutoCloseable {
      * @param toTag 对端 tag，可 {@code null}
      */
     public void bye(String deviceId, String callId, String toTag) {
+        bye(deviceId, deviceId, callId, toTag);
+    }
+
+    /**
+     * 结束会话 {@code BYE}，显式指定通道编码。
+     *
+     * <p>BYE 与 INVITE 同属一个对话框：Request-URI 与 To 必须与 INVITE 一致
+     * （都是<b>通道编码</b>），否则设备匹配不到对话框，BYE 被忽略，
+     * 设备会继续向上行推流直到自己超时——白白占用带宽。
+     */
+    public void bye(String deviceId, String channelId, String callId, String toTag) {
         SipPeer peer = requireSession(deviceId);
+        String target = StringUtils.isBlank(channelId) ? deviceId : channelId;
         Request request = factory.buildRequest(Request.BYE,
-                requestUri(peer, deviceId),
+                requestUri(peer, target),
                 serverUri(deviceId, configHost(), configPort()),
                 SipMessageFactory.newTag(),
-                factory.createUri(serverId(), peer.getIp(), peer.getPort()),
+                factory.createUri(target, peer.getIp(), peer.getPort()),
                 toTag, callId, nextDialogCSeq(callId), null, null);
         send(request, peer);
     }
@@ -287,7 +361,18 @@ public class Gb28181SipClient implements AutoCloseable {
      *                 {@code t=} 放时间范围，{@code a=Scale:} 放倍速
      */
     public void info(String deviceId, String callId, SdpMessage sdp) {
+        info(deviceId, deviceId, callId, sdp);
+    }
+
+    /**
+     * 会话内 {@code INFO} 回放控制，显式指定通道编码。
+     *
+     * <p>INFO 也必须在 INVITE 对话框内发送（RFC 2976），Request-URI 与 To
+     * 同样用<b>通道编码</b>，否则设备无法把指令关联到正在进行的回放会话。
+     */
+    public void info(String deviceId, String channelId, String callId, SdpMessage sdp) {
         SipPeer peer = requireSession(deviceId);
+        String target = StringUtils.isBlank(channelId) ? deviceId : channelId;
         Response ok = responses.get(callId);
         String fromTag = SipMessageFactory.newTag();
         String toTag = null;
@@ -302,10 +387,10 @@ public class Gb28181SipClient implements AutoCloseable {
             }
         }
         Request request = factory.buildInfo(
-                requestUri(peer, deviceId),
+                requestUri(peer, target),
                 serverUri(deviceId, configHost(), configPort()),
                 fromTag,
-                factory.createUri(serverId(), peer.getIp(), peer.getPort()),
+                factory.createUri(target, peer.getIp(), peer.getPort()),
                 toTag, callId, nextDialogCSeq(callId),
                 sdp == null ? null : sdp.toText());
         send(request, peer);
@@ -536,9 +621,21 @@ public class Gb28181SipClient implements AutoCloseable {
         return 1;
     }
 
-    /** 标准 9.2：Subject 头域携带点播源 ID、序列号等参数。 */
-    private static String subjectFor(String deviceId, String operation) {
-        return deviceId + ":" + operation + ":0";
+    /**
+     * 标准 9.2 的 {@code Subject} 头域格式：
+     * {@code <被点播通道编码>:<SSRC>,<平台编码>:<序号>}。
+     *
+     * <p>历史实现曾填 {@code <设备编码>:Play:0}（把操作名当 SSRC），
+     * 对端解析不出 SSRC 与目标通道，是点播失败的原因之一。
+     * 这里与 WVP-GB28181-pro 的
+     * {@code String.format("%s:%s,%s:%s", channelId, ssrc, sipConfig.getId(), 0)} 对齐。
+     *
+     * @param channelId 被点播的通道编码
+     * @param ssrc      SDP {@code y=} 行声明的 SSRC；未知时填 {@code 0}
+     */
+    private String subjectFor(String channelId, String ssrc) {
+        return channelId + ":" + (StringUtils.isBlank(ssrc) ? "0" : ssrc)
+                + "," + serverId() + ":0";
     }
 
     // ==================== 内部状态（供响应回调使用）====================

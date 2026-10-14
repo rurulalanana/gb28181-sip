@@ -16,9 +16,10 @@ import javax.xml.transform.Transformer;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
-import java.io.ByteArrayInputStream;
+import java.io.StringReader;
 import java.io.StringWriter;
 import java.nio.charset.Charset;
+import org.xml.sax.InputSource;
 
 /**
  * MANSCDP XML 解析与序列化工具。
@@ -56,6 +57,20 @@ public final class ManscdpXml {
     /**
      * 解析 XML 文本为 DOM。
      *
+     * <p><b>必须用字符流（{@link StringReader}）而非字节流</b>：入参 {@code xml} 已经
+     * 是解码好的字符串（见 {@link #decode}），若再 {@code getBytes()} 交给解析器，
+     * 解析器会<b>按文档内的 {@code encoding} 声明</b>重新解码字节 ——
+     * 设备普遍声明 {@code GB2312}（标准 6.10 规定 GB18030），而字节实际是 UTF-8，
+     * 于是中文被二次解码成不可逆乱码（{@code 岳溪河娄家} → {@code 宀虫邯…}，
+     * 且替换字符 {@code U+FFFD} 丢失原始信息）。
+     *
+     * <p>传入 {@link Reader} 时，XML 解析器直接使用该字符流，<b>忽略 encoding 声明</b>，
+     * 从根本上避免二次解码。实测对照（声明 GB2312）：
+     * <ul>
+     *   <li>字节流：UTF-8 内容 → 乱码；GBK 内容 → 乱码；声明 GB18030 → 直接解析异常</li>
+     *   <li>字符流：任意声明 → 均正确</li>
+     * </ul>
+     *
      * @throws IllegalArgumentException 文本为空或 XML 非法
      */
     public static Document parseDocument(String xml) {
@@ -74,7 +89,7 @@ public final class ManscdpXml {
             DocumentBuilder db = dbf.newDocumentBuilder();
             // 屏蔽解析器向 stderr 打印的错误
             db.setErrorHandler(null);
-            return db.parse(new ByteArrayInputStream(xml.trim().getBytes(OUTPUT_CHARSET)));
+            return db.parse(new InputSource(new StringReader(xml.trim())));
         } catch (ParserConfigurationException e) {
             throw new IllegalStateException("XML 解析器初始化失败", e);
         } catch (Exception e) {

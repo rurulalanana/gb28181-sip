@@ -173,7 +173,9 @@ public class GbSipListener implements SipListener {
         if (raw == null) {
             return;
         }
-        String xml = new String((byte[]) raw, java.nio.charset.Charset.forName("UTF-8"));
+        // 必须走 ManscdpXml.decode 而不是硬编码 UTF-8：设备可能发 GBK/GB18030，
+        // 硬解会得到乱码（详见 ManscdpXml.decode 的兼容策略）
+        String xml = io.github.rurulalanana.gb28181.sip.manscdp.ManscdpXml.decode((byte[]) raw);
         io.github.rurulalanana.gb28181.sip.manscdp.ManscdpMessage msg;
         try {
             msg = io.github.rurulalanana.gb28181.sip.manscdp.ManscdpXml.parse(xml);
