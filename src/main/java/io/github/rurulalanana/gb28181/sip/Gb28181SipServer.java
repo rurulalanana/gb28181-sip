@@ -114,6 +114,20 @@ public class Gb28181SipServer implements AutoCloseable {
             props.setProperty("javax.sip.STACK_NAME", "gb28181-" + nodeId);
             // 设备侧 NAT 场景：记录收到的源地址而非 Contact
             props.setProperty("javax.sip.IP_TABLES", "");
+            // 【关键】允许处理「无对应订阅会话」的 NOTIFY（jain-sip 默认丢弃并回 481）。
+            //
+            // 现场问题：下级平台（LiveGBS v250103）点「推送通道」时直接发
+            // SIP NOTIFY + MANSCDP Catalog 体，而我们从未向它发起过 SUBSCRIBE
+            // （国标里 SUBSCRIBE 是可选行为，很多平台不依赖它）。
+            // jain-sip 的订阅会话校验发现没有匹配的 dialog，就地回
+            // 481 Subscription does not exist，请求根本到不了 processRequest，
+            // 表现为「下级点了推送，本级毫无反应，只有重新注册（走 MESSAGE 全量
+            // 目录查询）才生效」。
+            // 置为 true 后这类 NOTIFY 会正常投递到 SipListener。
+            props.setProperty("gov.nist.javax.sip.DELIVER_UNSOLICITED_NOTIFY", "true");
+            // NOTIFY 的 Call-ID 由下级自造（如 832621896），与任何本地 dialog 都不匹配，
+            // 必须放宽 dialog 校验，否则仍会被协议栈挡掉。
+            props.setProperty("gov.nist.javax.sip.DELIVER_TERMINATED_EVENT_FOR_NULL_DIALOG", "true");
 
             sipStack = sipFactory.createSipStack(props);
             // 注意参数顺序为 (address, port, transport)，与接口声明的命名易混淆
