@@ -119,6 +119,17 @@ public class CatalogItem {
     private final String contactInfo;
     /** 录像保存天数。 */
     private final Integer recordSaveDays;
+    /**
+     * 目录项变更类型（附录 A.2.4，仅通知 {@code Notify} 中出现）。
+     *
+     * <p>取值：{@code ADD} 新增 / {@code UPDATE} 更新 / {@code DELETE} 删除 /
+     * {@code ON} 上线 / {@code OFF} 下线。查询应答（{@code Response}）里没有该字段。
+     *
+     * <p><b>不处理会怎样</b>：下级平台删除通道时推送 {@code <Event>DELETE</Event>}，
+     * 若一律当作「新增/更新」upsert，下级已删除的通道会被本级<b>重新加回来</b>，
+     * 形成永远删不掉的幽灵通道。
+     */
+    private final String event;
 
     /**
      * 把当前目录项追加到 {@code <DeviceList>} 下。
@@ -154,6 +165,8 @@ public class CatalogItem {
         if (info != null) {
             item.appendChild(info);
         }
+        // ---- Event：XSD 中位于 Info 之后，仅通知类报文携带 ----
+        ManscdpXml.addText(item, "Event", event);
         return item;
     }
 
@@ -245,6 +258,7 @@ public class CatalogItem {
                 .managementUnit(info == null ? null : text(info, "ManagementUnit"))
                 .contactInfo(info == null ? null : text(info, "ContactInfo"))
                 .recordSaveDays(info == null ? null : intOf(info, "RecordSaveDays"))
+                .event(text(item, "Event"))
                 .build();
     }
 
