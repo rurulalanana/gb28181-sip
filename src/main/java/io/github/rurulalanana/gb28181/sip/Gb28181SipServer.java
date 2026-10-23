@@ -78,7 +78,25 @@ public class Gb28181SipServer implements AutoCloseable {
     private final String nodeId;
 
     private volatile SipStack sipStack;
+
+    /**
+     * 主 {@link SipProvider}（第一个协议的那个）。
+     *
+     * <p>主动发送报文（INVITE / MESSAGE / ACK）默认走它。
+     * 多协议时各协议各有 provider，见 {@link #sipProviders}。
+     */
     private volatile SipProvider sipProvider;
+
+    /**
+     * 全部 {@link SipProvider}（按 transport 排列，主 provider 在前）。
+     *
+     * <p><b>为什么必须每个协议一个 provider</b>：jain-sip 的
+     * {@code getNewServerTransaction} 必须由<b>收到该请求的那个 provider</b>
+     * 调用 —— 用 UDP 的 provider 给 TCP 收到的请求建事务会抛异常，
+     * 于是 TCP 设备注册后收不到 200 OK，注册永远不成功。
+     */
+    private final java.util.List<SipProvider> sipProviders = new java.util.concurrent.CopyOnWriteArrayList<>();
+
     /** 包级可见：供 {@link Gb28181SipClient} 判断服务是否可用。 */
     volatile boolean running;
 
@@ -130,27 +148,114 @@ public class Gb28181SipServer implements AutoCloseable {
             props.setProperty("gov.nist.javax.sip.DELIVER_TERMINATED_EVENT_FOR_NULL_DIALOG", "true");
 
             sipStack = sipFactory.createSipStack(props);
-            // 注意参数顺序为 (address, port, transport)，与接口声明的命名易混淆
-            ListeningPoint lp = sipStack.createListeningPoint(
-                    StringUtils.defaultIfBlank(config.getHost(), "0.0.0.0"),
-                    config.getPort(),
-                    config.getTransport());
-            sipProvider = sipStack.createSipProvider(lp);
-            // jain-sip 1.2.344 不再自动创建 ServerTransaction，需由监听器显式创建后才能应答
-            sipProvider.addSipListener(new GbSipListener(
+            // 【多协议的正确做法】jain-sip 限制：一个 SipStack 只允许一个 SipListener，
+            // 所以不能「每个协议一个 provider + 一个 listener」——
+            // 第二个 addSipListener 会抛
+            // "Stack already has a listener. Only one listener per stack allowed"
+            // （实测踩过：TCP 端口已监听但收不到请求）。
+            //
+            // 正确姿势：每个协议建自己的 ListeningPoint，然后全部挂到
+            // **同一个** SipProvider 上。SipProviderImpl#addListeningPoint 支持这个，
+            // 收到的请求统一投给同一个 listener，getNewServerTransaction
+            // 会由 jain-sip 内部按 transaction 的 transport 正确处理。
+            //
+            // 【为什么要多协议】GB/T 28181 允许设备用 UDP 或 TCP 传信令，由设备侧配置。
+            // 只监听 UDP 时，配成 TCP 的设备根本注册不上，且平台日志一条都没有 ——
+            // 极易误判成网络不通或鉴权失败。
+            java.util.List<String> transports = resolveTransports();
+            if (transports.isEmpty()) {
+                throw new IllegalStateException("SIP transport 配置为空");
+            }
+            java.util.List<ListeningPoint> points = new java.util.ArrayList<>();
+            java.util.List<String> started = new java.util.ArrayList<>();
+            for (String transport : transports) {
+                try {
+                    // 注意参数顺序为 (address, port, transport)，与接口声明的命名易混淆
+                    points.add(sipStack.createListeningPoint(
+                            StringUtils.defaultIfBlank(config.getHost(), "0.0.0.0"),
+                            config.getPort(),
+                            transport));
+                    started.add(transport);
+                } catch (Exception e) {
+                    // 单协议失败不阻断另一个：设备可能只用其中一种，
+                    // 有种能通就比全不启动强。但必须明确告警，否则会以为监听正常。
+                    log.warn("SIP {} 监听 {}:{} 失败（另一协议不受影响）: {}",
+                            transport, config.getHost(), config.getPort(), e.getMessage());
+                }
+            }
+            if (points.isEmpty()) {
+                throw new IllegalStateException(
+                        "SIP 所有协议都启动失败，端口 " + config.getPort() + " 可能被占用");
+            }
+            SipProvider provider = sipStack.createSipProvider(points.get(0));
+            // 其余协议挂到同一个 provider 上（见上面「多协议的正确做法」）
+            // 注意：本模块 source=8，不能用 instanceof 模式匹配，故显式强转
+            if (provider instanceof gov.nist.javax.sip.SipProviderImpl) {
+                gov.nist.javax.sip.SipProviderImpl impl =
+                        (gov.nist.javax.sip.SipProviderImpl) provider;
+                for (int i = 1; i < points.size(); i++) {
+                    try {
+                        impl.addListeningPoint(points.get(i));
+                    } catch (Exception e) {
+                        log.warn("SIP 附加 {} 监听失败: {}",
+                                started.get(i), e.getMessage());
+                        started.remove(i);
+                    }
+                }
+            } else {
+                log.warn("SipProvider 非 jain-sip 实现（{}），只能监听 {} 一个协议",
+                        provider.getClass().getName(), started.get(0));
+                if (points.size() > 1) {
+                    started.subList(1, started.size()).clear();
+                }
+            }
+            provider.addSipListener(new GbSipListener(
                     config, new SipMessageFactory(sipFactory), callback, registry,
-                    credentialProvider, sipProvider, cascade));
+                    credentialProvider, provider, cascade));
+            sipProvider = provider;
+            sipProviders.add(provider);
             sipStack.start();
 
             running = true;
             log.info("GB28181 SIP 服务已启动: {}:{}/{}  serverId={} node={}",
-                    config.getHost(), config.getPort(), config.getTransport(),
+                    config.getHost(), config.getPort(), String.join("+", started),
                     config.getServerId(), nodeId);
-            callback.onStarted(config.getHost(), config.getPort(), config.getTransport());
+            callback.onStarted(config.getHost(), config.getPort(), String.join("+", started));
             return this;
         } catch (Exception e) {
             throw new IllegalStateException("SIP 服务启动失败: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * 解析要监听的协议列表。
+     *
+     * <p>兼容两种写法：
+     * <ul>
+     *   <li>单值历史写法 {@code "UDP"}；</li>
+     *   <li>逗号分隔多值 {@code "UDP,TCP"}（新默认）。</li>
+     * </ul>
+     * 大小写不敏感、去重、去空白，非法值（非 UDP/TCP）直接忽略并告警 ——
+     * 让配置写错时「部分能用」而不是整个 SIP 起不来。
+     */
+    private java.util.List<String> resolveTransports() {
+        String raw = config.getTransport();
+        if (StringUtils.isBlank(raw)) {
+            return java.util.List.of("UDP");
+        }
+        java.util.LinkedHashSet<String> out = new java.util.LinkedHashSet<>();
+        for (String part : raw.split(",")) {
+            String t = part.trim().toUpperCase(java.util.Locale.ROOT);
+            if (t.isEmpty()) {
+                continue;
+            }
+            if (!"UDP".equals(t) && !"TCP".equals(t)) {
+                log.warn("忽略不支持的 SIP transport: {}（只支持 UDP / TCP）", t);
+                continue;
+            }
+            out.add(t);
+        }
+        return new java.util.ArrayList<>(out);
     }
 
     /** 停止服务并释放端口。 */
@@ -166,6 +271,7 @@ public class Gb28181SipServer implements AutoCloseable {
             log.warn("停止 SIP 栈异常", e);
         } finally {
             running = false;
+            sipProviders.clear();
             sipStack = null;
             sipProvider = null;
             log.info("GB28181 SIP 服务已停止");
