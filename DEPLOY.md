@@ -112,18 +112,62 @@ target/gb28181-sip-1.0.0-javadoc.jar  文档
 ## 5. 完成发布
 
 `central-publishing-maven-plugin` 的 `autoPublish` 默认为 `false`，
-因此上传后需**手动发布**：
+因此 `mvn deploy` 只把构件上传到「VALIDATED」状态，还需要一步 Publish。
+
+### 方式 A：命令行（推荐，可脚本化）
+
+用 Central 的 Publisher API。**认证方式是坑**：必须是
+`Bearer base64(用户名:密码)`，直接 `Bearer <密码>` 会返回
+`401 Invalid token`。
+
+```bash
+# 从 settings.xml 读凭据并拼成 Bearer token
+U=$(sed -n '/<id>central<\/id>/,/<\/server>/p' ~/.m2/settings.xml \
+    | sed -n 's/.*<username>\([^<]*\)<.*/\1/p' | head -1)
+P=$(sed -n '/<id>central<\/id>/,/<\/server>/p' ~/.m2/settings.xml \
+    | sed -n 's/.*<password>\([^<]*\)<.*/\1/p' | head -1)
+AUTH=$(printf '%s:%s' "$U" "$P" | base64)
+
+# 查待发布的 deployment（看 deploymentId 与状态）
+curl -s "https://central.sonatype.com/api/v1/publisher/deployments" \
+  -H "Authorization: Bearer $AUTH"
+
+# 发布（成功返回 204，无响应体）
+curl -X POST \
+  "https://central.sonatype.com/api/v1/publisher/deployment/<deploymentId>" \
+  -H "Authorization: Bearer $AUTH"
+```
+
+注意端点就是 `POST /deployment/{id}` 本身 —— **没有** `/publish` 后缀
+（`/deployment/{id}/publish` 是 404）。
+
+状态流转：`VALIDATED` → `PUBLISHING` → `PUBLISHED`，
+`PUBLISHED` 之后同步到 `repo1.maven.org` 还要 1~30 分钟。
+
+完整 API 文档：<https://central.sonatype.com/api-doc>
+
+### 方式 B：网页
 
 1. 打开 <https://central.sonatype.com/publishing/deployments>
 2. 找到刚上传的 deployment（状态为 `VALIDATED` 才可发布）
 3. 点击 **Publish**
 
-若配置为 `autoPublish=true`，上传成功即自动发布。
+### 方式 C：完全自动
 
-同步到 Maven Central 通常需要 1~30 分钟，之后可这样验证：
+把 pom 的 `central-publishing-maven-plugin` 配置改为
+`<autoPublish>true</autoPublish>`（或 deploy 时加 `-DautoPublish=true`），
+上传成功即自动发布，无需额外步骤。
+
+### 验证
 
 ```bash
-mvn dependency:get -Dartifact=io.github.rurulalanana:gb28181-sip:1.0.0
+# 元数据里应出现新版本
+curl -s https://repo1.maven.org/maven2/io/github/rurulalanana/gb28181-sip/maven-metadata.xml \
+  | grep -oE '<version>[^<]+'
+
+# 用全新本地仓库验证依赖可解析（模拟其他使用者）
+mvn dependency:get -Dartifact=io.github.rurulalanana:gb28181-sip:1.0.4 \
+  -Dmaven.repo.local=/tmp/m2check
 ```
 
 ---
@@ -177,11 +221,16 @@ mvn deploy -Paliyun-rds
 修改 `pom.xml` 中的 `<version>` 后发布新版本：
 
 ```bash
-mvn versions:set -DnewVersion=1.0.1
+mvn versions:set -DnewVersion=1.0.5
 mvn clean deploy -Pcentral
 ```
 
-> Central 不允许覆盖已发布版本，重发同一版本号会被拒绝。
+> **Central 不允许覆盖已发布版本**，重发同一版本号会被拒绝。
+> 所以「改了代码但没升版本号」是本流程最容易踩的坑 ——
+> 发布前先 `git log` 看有没有新提交。
+
+> 依赖本模块的下游（如 `gb28181-sip-zlm`、`gb28181-platform-starter`）
+> 记得同步 `<sip.module.version>` 并重新构建，否则 fat jar 里还是旧库。
 
 ---
 
