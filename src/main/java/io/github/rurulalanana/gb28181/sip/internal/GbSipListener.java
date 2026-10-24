@@ -238,7 +238,15 @@ public class GbSipListener implements SipListener {
         boolean unregister = expires == 0;
 
         // ---- 摘要认证（标准 9.1.1 a） ----
-        if (credentialProvider != null && credentialProvider != CredentialProvider.PERMISSIVE) {
+        /*
+         * 三重判断：null / PERMISSIVE / isEnabled()==false 都表示此刻不鉴权。
+         *
+         * 最后一项是「运行期可关闭」的开关：平台侧的统一接入密码可以在界面上清空，
+         * 清空后必须立刻停止鉴权。若只看前两项（启动时决定），
+         * 清空密码后所有设备都会被 403 挡在门外。见 CredentialProvider#isEnabled。
+         */
+        if (credentialProvider != null && credentialProvider != CredentialProvider.PERMISSIVE
+                && credentialProvider.isEnabled()) {
             AuthorizationHeader auth = (AuthorizationHeader) request.getHeader(SipHeaders.AUTHORIZATION);
             if (auth == null) {
                 // 无凭据 → 401 challenge

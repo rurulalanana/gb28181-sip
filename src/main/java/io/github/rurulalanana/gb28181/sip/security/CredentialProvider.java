@@ -21,6 +21,26 @@ public interface CredentialProvider {
      */
     String passwordOf(String username);
 
+    /**
+     * 当前是否<b>需要</b>鉴权。
+     *
+     * <p>默认 {@code true}（一旦提供了本实现就按鉴权处理），
+     * 保持与历史行为一致。
+     *
+     * <p><b>为什么需要这个方法</b>：平台侧的「设备统一接入密码」是可以在界面上
+     * 清空以关闭鉴权的。而 {@link #passwordOf} 返回 {@code null} 的语义是
+     * 「用户不存在 → 403」，不能挪用来表示「不鉴权」。
+     * 若只在启动时按密码是否为空来「传/不传」本实现，那运行期把它清空后
+     * 所有设备都会被 403 挡在门外 —— 必须能<b>每次 REGISTER 重新问一次</b>。
+     *
+     * <p>调用方应在 {@code passwordOf} 之前先看本方法。
+     *
+     * @return {@code false} 表示此刻不鉴权（等同于放行）
+     */
+    default boolean isEnabled() {
+        return true;
+    }
+
     /** 是否为已知用户。默认实现仅判断 {@code passwordOf} 非 {@code null}。 */
     default boolean exists(String username) {
         return passwordOf(username) != null;
