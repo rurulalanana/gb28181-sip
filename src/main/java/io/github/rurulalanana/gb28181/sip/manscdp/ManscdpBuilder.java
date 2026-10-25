@@ -3,6 +3,7 @@ package io.github.rurulalanana.gb28181.sip.manscdp;
 import io.github.rurulalanana.gb28181.sip.constant.CmdType;
 import io.github.rurulalanana.gb28181.sip.constant.ManscdpTypes;
 import lombok.SneakyThrows;
+import org.apache.commons.collections4.ListUtils;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 
@@ -373,10 +374,57 @@ public final class ManscdpBuilder {
         return out(root);
     }
 
+    /**
+     * 把上级下发的 {@code <Control>} 指令转成下发给设备的 {@code <Control>}，<b>仅替换 SN</b>。
+     *
+     * <p><b>为什么要原样转发而不是逐字段重新构造</b>：
+     * <ol>
+     *   <li>控制命令族有十几种（{@code PTZCmd} / {@code PresetCmd} / {@code FiCmd} /
+     *       {@code RecordCmd} / {@code GuardCmd} / {@code DragZoomIn} / {@code HomePosition}
+     *       / {@code FormatSDCard} …），逐个字段映射既冗长又必然漏项；</li>
+     *   <li>{@code PTZCmd} 是<b>8 字节不透明十六进制串</b>（A.5 附录），各厂商对保留位的
+     *       用法不同（有的塞预置位号、有的塞绝对位置），解码再编码会破坏对方语义；</li>
+     *   <li>上级看到的通道编码就是我们自己的通道编码（目录是我们发给它的），
+     *       所以 {@code <DeviceID>} 无需改写。</li>
+     * </ol>
+     *
+     * <p><b>为什么必须替换 SN</b>：SN 是 MANSCDP 的请求序号，由发起方持有并用来匹配应答。
+     * 上级的 SN 是上级的事务号，我们向设备发起的是新事务，必须用自己的 SN，
+     * 否则设备的应答会与上级的等待队列撞号。
+     *
+     * <p>字段顺序按原报文顺序保留（标准 XSD 的 sequence 顺序敏感，国标设备普遍
+     * 顺序严格校验，重排会导致整条消息被丢弃）。
+     *
+     * @param sn  本级新的 SN
+     * @param src 上级的原始 {@code <Control>} 消息
+     * @return 可下发给设备的 XML
+     */
+    public static String relinkControl(int sn, ManscdpMessage src) {
+        Document doc = ManscdpXml.newDocument();
+        Element root = doc.createElement("Control");
+        doc.appendChild(root);
+        boolean snWritten = false;
+        // children 是 LinkedHashMap，按原报文首次出现顺序遍历，保证顺序不变
+        for (java.util.Map.Entry<String, List<Element>> e : src.getChildren().entrySet()) {
+            if ("SN".equals(e.getKey())) {
+                ManscdpXml.addText(root, "SN", sn);
+                snWritten = true;
+                continue;
+            }
+            for (Element child : ListUtils.emptyIfNull(e.getValue())) {
+                root.appendChild(doc.importNode(child, true));
+            }
+        }
+        if (!snWritten) {
+            // 原报文无 SN（不合规，但真实设备出现过）：补在末尾，至少不丢消息体
+            ManscdpXml.addText(root, "SN", sn);
+        }
+        return out(root);
+    }
+
     /** PTZ 精准控制（A.2.3.1.11）。{@code pan} 0~360，{@code tilt} -90~90，{@code zoom} >1。 */
     public static String ptzPreciseControl(int sn, String deviceId, Double pan, Double tilt, Double zoom) {
-        Element root = base("Control", CmdType.DEVICE_CONTROL, sn, deviceId);
-        Element ctl = ManscdpXml.addContainer(root, "PTZPreciseCtrl", null);
+        Element root = base("Control", CmdType.DEVICE_CONTROL, sn, deviceId);        Element ctl = ManscdpXml.addContainer(root, "PTZPreciseCtrl", null);
         ManscdpXml.addText(ctl, "Pan", pan);
         ManscdpXml.addText(ctl, "Tilt", tilt);
         ManscdpXml.addText(ctl, "Zoom", zoom);

@@ -252,4 +252,54 @@ public class ManscdpTest {
         assertTrue(xml.contains("UTF-8"));
         assertNotNull(xml);
     }
+
+    @Test
+    public void 级联转发控制应只替换SN并保留指令语义() {
+        // 上级点云台的原始报文（PTZCmd 是 8 字节不透明串，绝不能解码后重编码）
+        String fromParent = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                + "<Control><CmdType>DeviceControl</CmdType><SN>9527</SN>"
+                + "<DeviceID>" + CAMERA + "</DeviceID>"
+                + "<PTZCmd>A50F0101A0000000</PTZCmd></Control>";
+        ManscdpMessage src = ManscdpXml.parse(fromParent);
+
+        String forwarded = ManscdpBuilder.relinkControl(4242, src);
+        ManscdpMessage out = ManscdpXml.parse(forwarded);
+
+        // SN 必须换成我们自己的（上级的 SN 是它的事务号，撞号会让设备应答错位）
+        assertEquals(4242, out.getSn());
+        // 通道编码与指令原样保留
+        assertEquals(CAMERA, out.getDeviceId());
+        assertEquals("A50F0101A0000000", out.firstText("PTZCmd"));
+        assertEquals("DeviceControl", out.getCmdType());
+        assertEquals("Control", out.getRootName());
+    }
+
+    @Test
+    public void 级联转发控制应保持XSD字段顺序() {
+        // 国标设备对 sequence 顺序严格校验，CmdType 必须在 SN 之前
+        String fromParent = "<Control><CmdType>DeviceControl</CmdType><SN>1</SN>"
+                + "<DeviceID>" + CAMERA + "</DeviceID>"
+                + "<PTZCmd>A50F0101A0000000</PTZCmd></Control>";
+        String forwarded = ManscdpBuilder.relinkControl(2, ManscdpXml.parse(fromParent));
+        int cmdType = forwarded.indexOf("CmdType");
+        int sn = forwarded.indexOf("<SN>");
+        int deviceId = forwarded.indexOf("DeviceID");
+        int ptzCmd = forwarded.indexOf("PTZCmd");
+        assertTrue("CmdType 应在 SN 之前", cmdType < sn);
+        assertTrue("SN 应在 DeviceID 之前", sn < deviceId);
+        assertTrue("DeviceID 应在 PTZCmd 之前", deviceId < ptzCmd);
+    }
+
+    @Test
+    public void 级联转发除云台外的控制指令也应原样带上() {
+        // 预置位删除这类指令与 PTZCmd 完全不同的字段集，必须同样能转发
+        String fromParent = "<Control><CmdType>DeviceControl</CmdType><SN>7</SN>"
+                + "<DeviceID>" + CAMERA + "</DeviceID>"
+                + "<PresetCmd>Del</PresetCmd><PresetID>12</PresetID></Control>";
+        ManscdpMessage out = ManscdpXml.parse(
+                ManscdpBuilder.relinkControl(8, ManscdpXml.parse(fromParent)));
+        assertEquals("Del", out.firstText("PresetCmd"));
+        assertEquals("12", out.firstText("PresetID"));
+        assertEquals(8, out.getSn());
+    }
 }

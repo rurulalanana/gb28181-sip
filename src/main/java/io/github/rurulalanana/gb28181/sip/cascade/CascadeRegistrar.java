@@ -396,6 +396,36 @@ public class CascadeRegistrar {
     }
 
     /**
+     * 应答上级下发的设备控制指令（云台、预置位、拉框缩放、布撤防等）。
+     *
+     * <p><b>必须立即应答，不能等设备回 Response</b>：
+     * 设备对云台这类「命令型」指令普遍<b>不做应用层应答</b>（国标未强制，
+     * 实际设备多数只动云台不发 Response）。若本级等设备应答后再回上级，
+     * 上级必然在自己的超时窗口内收不到 {@code <Response>}，
+     * 界面上就表现为「控制失败」—— 而云台其实已经动了。
+     *
+     * <p>所以本方法的语义是「<b>已受理</b>」而非「已执行」：
+     * 只要指令成功转发给设备就回 {@code OK}，转发失败（通道不存在、
+     * 设备离线、未授权）才回 {@code ERROR}。
+     *
+     * @param querySn  上级原始 SN（必须原样带回，否则上级按超时丢弃）
+     * @param deviceId 上级请求里的通道编码（回填到应答的 {@code <DeviceID>}）
+     * @param ok       是否受理
+     */
+    public boolean replyDeviceControl(int querySn, String deviceId, boolean ok) {
+        try {
+            String targetId = StringUtils.defaultIfBlank(deviceId, localId);
+            sendMessage(ManscdpBuilder.deviceControlResponse(querySn, targetId,
+                    ok ? "OK" : "ERROR"));
+            return true;
+        } catch (Exception e) {
+            lastError = "控制应答失败：" + e.getMessage();
+            log.warn("级联控制应答失败: {}", e.toString());
+            return false;
+        }
+    }
+
+    /**
      * 按配置地址向<b>上级</b>发送 MANSCDP 消息。
      *
      * <p><b>为什么不能用 {@code client.sendMessage(parentId, xml)}</b>：
