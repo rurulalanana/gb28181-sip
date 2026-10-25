@@ -122,6 +122,35 @@ public class ManscdpTest {
     }
 
     @Test
+    public void 目录主动推送必须是Notify而不是Response() {
+        /*
+         * 这两个根节点的区别是「有没有人在等」：
+         *   Response 是对某个查询的答复，对端按 (SN, DeviceID) 匹配它自己发出的查询，
+         *            匹配不上就静默丢弃 —— 双方日志都看不到错误，只有对端通道数为 0。
+         *   Notify   是主动通知，不需要有人提问。
+         *
+         * 实测 LiveGBS 就是这个行为：用 Response 推送目录，它既不报错也不落库。
+         * 所以这里把「推送用 Notify」固化成断言，避免以后又被改回去。
+         */
+        CatalogItem item = CatalogItem.builder()
+                .deviceId(CAMERA)
+                .name("前端摄像机01")
+                .event("ON")
+                .build();
+        String xml = ManscdpBuilder.catalogNotify(21, PLATFORM,
+                java.util.Collections.singletonList(item));
+        ManscdpMessage m = ManscdpXml.parse(xml);
+
+        assertEquals("Notify", m.getRootName());
+        assertEquals("Catalog", m.getCmdType());
+        // SumNum 与 DeviceList/@Num 必须一致，且空列表时也要出现
+        assertEquals("1", m.firstText("SumNum"));
+        assertEquals(Integer.valueOf(1), m.containerNum("DeviceList"));
+        // Event 必填：对端据此判断新增/更新/删除，缺了会被当成非法条目丢弃
+        assertEquals("ON", CatalogItem.from(m.items("DeviceList").get(0)).getEvent());
+    }
+
+    @Test
     public void 设备状态应答四套枚举不可混用() {
         // A.2.6.6: Result=OK/ERROR, Online=ONLINE/OFFLINE, Status=OK/ERROR, Encode/Record=ON/OFF
         String xml = ManscdpBuilder.deviceStatusResponse(30, CAMERA,

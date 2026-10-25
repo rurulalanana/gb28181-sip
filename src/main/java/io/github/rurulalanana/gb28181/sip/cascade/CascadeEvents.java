@@ -85,4 +85,29 @@ public final class CascadeEvents {
         /** 底层事件，调用方可用 {@code client().ackInvite(...)} 应答。 */
         private final javax.sip.RequestEvent rawRequestEvent;
     }
+
+    /**
+     * 上级平台点播<b>本级自有通道</b>（级联上行）。
+     *
+     * <p>与 {@link CascadeInvite} 的区别是「流在哪一侧」：
+     * 那个是上级点播我们<b>下级平台</b>的通道，需要往下转发；
+     * 这个是上级点播<b>本级自己</b>的通道，需要本级把流推上去。
+     */
+    @Getter
+    @Builder
+    @ToString
+    public static class UplinkPlay {
+        /** 上级平台编码（来自 From 头）。 */
+        private final String platformId;
+        /** 被点播的通道编码。 */
+        private final String channelId;
+        /** 上级的收流地址（来自其 INVITE 的 SDP {@code c=}）。 */
+        private final String dstIp;
+        /** 上级的收流端口（来自 SDP {@code m=}）。 */
+        private final int dstPort;
+        /** 上级在 SDP {@code y=} 中指定的 SSRC；可能为空。 */
+        private final String ssrc;
+        /** 调用 Call-ID，用于 BYE 时停止推流。 */
+        private final String callId;
+    }
 }

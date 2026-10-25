@@ -89,11 +89,115 @@ public class Gb28181SipClient implements AutoCloseable {
         send(request, peer);
     }
 
+    /**
+     * 向<b>显式地址</b>发送 MANSCDP MESSAGE。
+     *
+     * <p><b>为什么需要绕过会话表</b>：国标级联里「本级作为下级向上级注册」这个方向上，
+     * 上级永远不会注册到本级，因此会话表里永远查不到它的地址 ——
+     * {@link #sendMessage(String, String)} 第一行就抛「设备未注册或会话已失效」。
+     * 之前的级联目录推送正是卡在这里：配置存下来了，但一条信令都发不出去。
+     *
+     * <p>本方法用配置里的 IP/端口直接寻址，适用于：
+     * <ul>
+     *   <li>向上级平台推送目录 / 发心跳；</li>
+     *   <li>回复上级的目录查询（同样不知上级地址）。</li>
+     * </ul>
+     *
+     * @param targetId 对端平台编码（写入 To 头）
+     * @param ip       对端 IP
+     * @param port     对端端口
+     * @param xml      MANSCDP 消息体
+     */
+    public void sendMessageTo(String targetId, String ip, int port, String xml) {
+        sendMessageTo(null, targetId, ip, port, xml);
+    }
+
+    /**
+     * 向<b>显式地址</b>发送 MANSCDP MESSAGE，并指定 {@code From} 里的编码。
+     *
+     * <p><b>为什么还需要单独指定 From</b>：国标级联允许本级用一个
+     * <b>与自身平台编码不同</b>的编号向上级注册（{@code gb_cascade.local_id}）。
+     * 典型场景是对端与本级用了相同的平台编码 —— 那时必须换一个编号，
+     * 否则上级会认为「你在拿我自己的编码注册」。
+     *
+     * <p>如果这里固定用 {@code server.config().serverId()}，就会出现一种
+     * 非常难查的现象：
+     * <ul>
+     *   <li>REGISTER 能成功（应答由注册事务匹配，不看 From 内容）；</li>
+     *   <li>但 Keepalive / 目录 Notify 全部被静默丢弃 —— 因为对端从
+     *       {@code From} 里读到的编码不是它认得的那个下级平台
+     *       （最坏情况是它自己的编码），于是当成未知来源忽略掉。</li>
+     * </ul>
+     * 表现为「注册在线、通道也能查到，但心跳永远不更新、主动推送不生效」。
+     *
+     * @param fromId 本级在级联中的编码；{@code null}/{@code blank} 时用平台配置的编码
+     * @param targetId 对端平台编码（写入 To 头与 Request-URI）
+     * @param ip       对端 IP
+     * @param port     对端端口
+     * @param xml      MANSCDP 消息体
+     */
+    public void sendMessageTo(String fromId, String targetId, String ip, int port, String xml) {
+        sendMessageTo(fromId, targetId, ip, port, xml, null);
+    }
+
+    /**
+     * 向显式地址发送 MANSCDP MESSAGE，并指定 {@code From} 编码与字符集。
+     *
+     * @param charset 对端期望的消息体字符集（如 {@code GB2312}）；
+     *                {@code null}/blank 时用 UTF-8。
+     *                不指定时如果对端按 GB2312 解，中文字段会变乱码（详见
+     *                {@code SipMessageFactory#buildMessage(SipURI, SipURI, SipURI, String, String)}）。
+     */
+    public void sendMessageTo(String fromId, String targetId, String ip, int port,
+                              String xml, String charset) {
+        if (StringUtils.isBlank(ip) || port <= 0) {
+            throw new IllegalStateException("对端地址未配置: " + ip + ":" + port);
+        }
+        SipPeer peer = SipPeer.builder()
+                .deviceId(targetId)
+                .ip(ip)
+                .port(port)
+                .transport(configTransport())
+                .domain(io.github.rurulalanana.gb28181.sip.constant.GbId.isValidDeviceId(targetId)
+                        ? io.github.rurulalanana.gb28181.sip.constant.GbId.domainOf(targetId)
+                        : server.config().getDomain())
+                .build();
+        // From 用本级在级联中的编码；To / Request-URI 用对端编码
+        String useFrom = StringUtils.isBlank(fromId) ? serverId() : fromId.trim();
+        SipURI fromUri = factory.createUri(useFrom, configHost(), configPort());
+        SipURI targetUri = factory.createUri(targetId, ip, port);
+        Request request = factory.buildMessage(targetUri, fromUri, targetUri, xml, charset);
+        send(request, peer);
+    }
+
+    /** 当前生效的传输协议（多协议时取第一个）。 */
+    private String configTransport() {
+        String transports = server.config().getTransport();
+        if (StringUtils.isBlank(transports)) {
+            return "UDP";
+        }
+        int comma = transports.indexOf(',');
+        return (comma > 0 ? transports.substring(0, comma) : transports).trim();
+    }
+
+    /**
+     * 丢弃某个 Call-ID 的响应缓存。
+     *
+     * <p>供「每次都用新 Call-ID」的调用方（如级联注册）用完清理，
+     * 否则 {@code responses} 表会随交互次数无限增长 —— 一天几百次注册就是几百条泄漏。
+     */
+    public void forgetCallId(String callId) {
+        if (callId == null) {
+            return;
+        }
+        responses.remove(callId);
+        pending.remove(callId);
+    }
+
     /** 设备目录查询（标准 9.5）。 */
     public void queryCatalog(String deviceId) {
         sendMessage(deviceId, ManscdpBuilder.catalogQuery(nextSn(), deviceId));
     }
-
     /** 设备目录查询（带时间范围）。 */
     public void queryCatalog(String deviceId, String startTime, String endTime) {
         sendMessage(deviceId, ManscdpBuilder.catalogQuery(nextSn(), deviceId, startTime, endTime));

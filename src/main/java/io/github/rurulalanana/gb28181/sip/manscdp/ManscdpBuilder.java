@@ -267,6 +267,37 @@ public final class ManscdpBuilder {
     }
 
     /**
+     * 目录变更<b>通知</b>（A.2.5，{@code <Notify>} 根节点）。
+     *
+     * <p><b>与 {@link #catalogResponse} 的区别是「有没有人在等」</b>：
+     * <ul>
+     *   <li>{@code <Response>} 是<b>对某个查询的答复</b>，对端按
+     *       {@code (SN, DeviceID)} 去匹配它自己发出过的查询；
+     *       匹配不上就直接丢弃 —— 它没有任何理由相信这个 SN 属于自己。</li>
+     *   <li>{@code <Notify>} 是<b>主动通知</b>，不需要有人提问，
+     *       对端按「目录变化」处理（新增/更新/删除）。</li>
+     * </ul>
+     *
+     * <p><b>这个区别踩过</b>：级联时本级通道有变化，用 {@code <Response>} 推给上级，
+     * 上级（实测 LiveGBS）收到后既不报错也不落库 —— 因为它没在等那个 SN。
+     * 现象是「日志显示推送成功、对端通道数一直是 0」，而且双方都没有任何错误日志，
+     * 属于最难排查的一类。
+     *
+     * @param sn       消息序号
+     * @param deviceId 本级平台编码
+     * @param items    变化的目录项（{@code Item/Event} 决定是新增还是删除）
+     */
+    public static String catalogNotify(int sn, String deviceId, Collection<CatalogItem> items) {
+        List<CatalogItem> list = items == null ? java.util.Collections.emptyList()
+                : new java.util.ArrayList<>(items);
+        Element root = base("Notify", CmdType.CATALOG, sn, deviceId);
+        ManscdpXml.addText(root, "SumNum", list.size());
+        Element deviceList = ManscdpXml.addContainer(root, "DeviceList", list.size());
+        list.forEach(it -> it.appendTo(deviceList));
+        return out(root);
+    }
+
+    /**
      * 设备状态查询应答（A.2.6.6）。
      * <p><b>四个状态字段取值域互不相同，切勿混用</b>：
      * {@code result} → OK/ERROR；{@code online} → ONLINE/OFFLINE；

@@ -212,6 +212,82 @@ public final class SipMessageFactory {
                 toUri, null, newCallId(), 1L, MANSCDP_CONTENT_TYPE, xml);
     }
 
+    /**
+     * 构造 MANSCDP MESSAGE 请求，消息体按指定字符集编码（标准 9.3 c / 9.5 d）。
+     *
+     * <p><b>为什么要能指定字符集</b>：国标里 MANSCDP 的字符集由<b>对端</b>决定 ——
+     * 很多平台（实测 LiveGBS）对每个设备存了一个 {@code Charset}（默认 GB2312），
+     * 收到消息后按它解码。我们发 UTF-8 字节、声明里也写 UTF-8，但对方按 GB2312 解，
+     * 结果就是通道名变成「鐏姳姘村簱」这种乱码 —— 而<b>通道本身、ID、状态全都正常</b>，
+     * 所以很容易被当成「只是显示问题」忽略掉。
+     *
+     * <p>这里把「声明」与「实际字节」一起按目标字符集生成，两者永远一致。
+     *
+     * @param charset 对端期望的字符集（如 {@code GB2312} / {@code UTF-8}）；空则 UTF-8
+     */
+    public Request buildMessage(SipURI requestUri, SipURI fromUri, SipURI toUri,
+                                String xml, String charset) {
+        String cs = StringUtils.isBlank(charset) ? "UTF-8" : charset.trim();
+        // 声明与实际字节必须一致：严格的解析器会因不一致直接报错，
+        // 宽松的解析器按声明解，照样乱码。
+        String body = xml == null ? "" : xml.replaceFirst(
+                "(?i)encoding\\s*=\\s*\"[^\"]*\"", "encoding=\"" + cs + "\"");
+        byte[] bytes;
+        try {
+            bytes = body.getBytes(cs);
+        } catch (java.io.UnsupportedEncodingException e) {
+            throw new SipBuildException("不支持的字符集: " + cs, e);
+        }
+        return buildRequestBytes(Request.MESSAGE, requestUri, fromUri, newTag(),
+                toUri, null, newCallId(), 1L, MANSCDP_CONTENT_TYPE, cs, bytes);
+    }
+
+    /**
+     * 构造消息体为原始字节的请求。
+     *
+     * <p>与 {@link #buildRequest} 的唯一区别是 content 走 jain-sip 的 {@code byte[]}
+     * 重载，从而<b>完全控制字符编码</b>。String 重载由协议栈内部决定编码，
+     * 调用方无法干预 —— 这正是级联字符集问题的根源。
+     */
+    public Request buildRequestBytes(String method, SipURI requestUri,
+                                     SipURI fromUri, String fromTag,
+                                     SipURI toUri, String toTag,
+                                     String callId, long cSeq,
+                                     String contentType, String charset, byte[] content) {
+        try {
+            FromHeader from = headerFactory.createFromHeader(
+                    addressFactory.createAddress(fromUri), fromTag);
+            ToHeader to = headerFactory.createToHeader(
+                    addressFactory.createAddress(toUri), toTag);
+            CSeqHeader cseq = headerFactory.createCSeqHeader(cSeq, method);
+            CallIdHeader callIdHeader = headerFactory.createCallIdHeader(callId);
+            MaxForwardsHeader maxForwards = headerFactory.createMaxForwardsHeader(70);
+            ContentTypeHeader ct = contentType(contentType);
+            if (ct != null && StringUtils.isNotBlank(charset)) {
+                // 显式带 charset 参数：部分平台优先看这里而不是 XML 声明
+                ct.setParameter("charset", charset);
+            }
+            String viaHost = fromUri.getHost() != null ? fromUri.getHost() : "127.0.0.1";
+            int viaPort = fromUri.getPort() != -1 ? fromUri.getPort() : 5060;
+            ViaHeader viaHeader = headerFactory.createViaHeader(viaHost, viaPort, "UDP", newTag());
+            try {
+                viaHeader.setRPort();
+            } catch (Exception ignore) {
+                // 同上：不支持 rport 的实现忽略即可
+            }
+            List<ViaHeader> via = Collections.singletonList(viaHeader);
+            Request request = messageFactory.createRequest(requestUri, method, callIdHeader,
+                    cseq, from, to, via, maxForwards, ct,
+                    content == null ? new byte[0] : content);
+            ContactHeader contact = headerFactory.createContactHeader(
+                    addressFactory.createAddress(fromUri));
+            request.addHeader(contact);
+            return request;
+        } catch (Exception e) {
+            throw new SipBuildException("构造 SIP 请求失败: " + method, e);
+        }
+    }
+
     /** 构造带 SDP 的 INVITE 请求（标准 9.2）。 */
     public Request buildInvite(SipURI requestUri, SipURI fromUri, SipURI toUri,
                                String sdp, String subject) {

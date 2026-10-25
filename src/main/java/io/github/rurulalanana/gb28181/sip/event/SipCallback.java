@@ -228,4 +228,26 @@ public interface SipCallback {
     default void onCascadeInvite(
             io.github.rurulalanana.gb28181.sip.cascade.CascadeEvents.CascadeInvite event) {
     }
+
+    /**
+     * 上级平台点播本级通道（<b>级联上行</b>）。
+     *
+     * <p>与 {@link #onCascadeInvite} 方向相反：
+     * <ul>
+     *   <li>{@code onCascadeInvite} —— 上级点播<b>我们下级平台</b>的通道，
+     *       需要把媒体流转发下去；</li>
+     *   <li>本回调 —— 上级点播<b>本级自有</b>的通道，需要本级把流推上去。</li>
+     * </ul>
+     *
+     * <p>媒体层已经把 200 OK 与 SDP 应答发出去了，业务方要做的是：
+     * 按 {@code channelId} 确保本地流已启动，然后调用
+     * {@code ZlmMediaServer#startSendRtpToSource} 推 RTP 给
+     * {@code dstIp:dstPort}，SSRC 用 {@code ssrc}。
+     *
+     * <p><b>必须在异步线程里处理</b>：启动流要发 INVITE 给设备并等它推流，
+     * 可能几秒；本回调运行在协议栈线程上，阻塞它会拖垮整个信令。
+     */
+    default void onUplinkCascadePlay(
+            io.github.rurulalanana.gb28181.sip.cascade.CascadeEvents.UplinkPlay event) {
+    }
 }

@@ -279,6 +279,12 @@ public class Gb28181SipServer implements AutoCloseable {
             sipProviders.clear();
             sipStack = null;
             sipProvider = null;
+            // 清掉缓存的客户端：它已随栈失效，下次 client() 重新创建
+            Gb28181SipClient c = clientInstance;
+            clientInstance = null;
+            if (c != null) {
+                c.close();
+            }
             log.info("GB28181 SIP 服务已停止");
             callback.onStopped();
         }
@@ -320,8 +326,37 @@ public class Gb28181SipServer implements AutoCloseable {
      * <p>客户端与本服务端共用 SIP 栈，因此可同时提供双向服务。
      */
     public Gb28181SipClient client() {
-        return new Gb28181SipClient(this);
+        /*
+         * 必须缓存单实例。
+         *
+         * <p>早先这里每次都 {@code new Gb28181SipClient(this)}，带来三个真问题：
+         * <ul>
+         *   <li><b>SN 永远从 1 开始</b>。SN 计数器是客户端字段，每次新建就重置。
+         *       实测级联心跳每 30 秒发出的一直是 {@code SN=1} —— 标准 A.2.1.3 要求
+         *       递增序号，对端（如 LiveGBS）可能按 SN 去重，重复序号会被静默丢弃。</li>
+         *   <li><b>桥接注册表无限增长</b>：每个新实例都会在
+         *       {@code Gb28181SipClientBridge} 里注册且从不注销，
+         *       而响应是广播给所有实例的 —— 实例越多，每条响应的处理开销越大。</li>
+         *   <li>同步等待的 {@code pending} 表分散在不同实例上，
+         *       靠广播恰好能唤醒，但属于「碰巧能跑」。 </li>
+         * </ul>
+         * 客户端本身无状态（与协议栈同生命周期），完全可以复用。
+         */
+        Gb28181SipClient c = clientInstance;
+        if (c == null) {
+            synchronized (this) {
+                c = clientInstance;
+                if (c == null) {
+                    c = new Gb28181SipClient(this);
+                    clientInstance = c;
+                }
+            }
+        }
+        return c;
     }
+
+    /** 缓存的客户端实例；SIP 栈停止时置空（下次取用重新创建）。 */
+    private volatile Gb28181SipClient clientInstance;
 
     @Override
     public void close() {
