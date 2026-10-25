@@ -75,6 +75,8 @@ public class Gb28181SipServer implements AutoCloseable {
     private final CascadeManager cascade;
 
     private final CredentialProvider credentialProvider;
+    /** 接入控制（黑白名单）；{@code null} 表示不限制来源。 */
+    private final io.github.rurulalanana.gb28181.sip.security.AccessControl accessControl;
     private final String nodeId;
 
     private volatile SipStack sipStack;
@@ -102,12 +104,15 @@ public class Gb28181SipServer implements AutoCloseable {
 
     Gb28181SipServer(SipServerConfig config, SipCallback callback, DeviceRegistry registry,
                      CascadeRegistry cascadeRegistry,
-                     CredentialProvider credentialProvider, String nodeId) {
+                     CredentialProvider credentialProvider,
+                     io.github.rurulalanana.gb28181.sip.security.AccessControl accessControl,
+                     String nodeId) {
         this.config = config;
         this.callback = callback == null ? new SipCallback() {
         } : callback;
         this.registry = registry == null ? new LocalDeviceRegistry() : registry;
         this.credentialProvider = credentialProvider;
+        this.accessControl = accessControl;
         this.nodeId = nodeId;
         this.factory = new SipMessageFactory(SipFactory.getInstance());
         this.cascade = new CascadeManager(
@@ -211,7 +216,7 @@ public class Gb28181SipServer implements AutoCloseable {
             }
             provider.addSipListener(new GbSipListener(
                     config, new SipMessageFactory(sipFactory), callback, registry,
-                    credentialProvider, provider, cascade));
+                    credentialProvider, accessControl, provider, cascade));
             sipProvider = provider;
             sipProviders.add(provider);
             sipStack.start();
@@ -355,6 +360,7 @@ public class Gb28181SipServer implements AutoCloseable {
         private DeviceRegistry registry;
         private CascadeRegistry cascadeRegistry;
         private CredentialProvider credentialProvider;
+        private io.github.rurulalanana.gb28181.sip.security.AccessControl accessControl;
         private String nodeId;
 
         /** 平台/服务器编码（20 位）。 */
@@ -474,6 +480,18 @@ public class Gb28181SipServer implements AutoCloseable {
             return this;
         }
 
+        /**
+         * 接入控制（黑白名单）；不设置则不限制来源。
+         *
+         * <p>与 {@link #credentialProvider} 是<b>两道独立</b>的闸门：
+         * 本项在摘要认证之前生效，不依赖密码是否正确。
+         * 实现方需保证非阻塞且线程安全（在协议栈线程上每个 REGISTER 调用一次）。
+         */
+        public Builder accessControl(io.github.rurulalanana.gb28181.sip.security.AccessControl control) {
+            this.accessControl = control;
+            return this;
+        }
+
         /** 节点 ID（集群路由用），默认取 serverId。 */
         public Builder nodeId(String nodeId) {
             this.nodeId = nodeId;
@@ -506,7 +524,8 @@ public class Gb28181SipServer implements AutoCloseable {
                     .transactionTimeoutMillis(transactionTimeoutMillis)
                     .cleanupInterval(cleanupInterval)
                     .build();
-            return new Gb28181SipServer(cfg, callback, registry, cascadeRegistry, credentialProvider, id);
+            return new Gb28181SipServer(cfg, callback, registry, cascadeRegistry,
+                    credentialProvider, accessControl, id);
         }
 
         /** 构建并启动。 */

@@ -60,6 +60,8 @@ public class GbSipListener implements SipListener {
     private final SipCallback callback;
     private final DeviceRegistry registry;
     private final CredentialProvider credentialProvider;
+    /** 接入控制（黑白名单）；{@code null} 或 PERMISSIVE 表示不限制来源。 */
+    private final io.github.rurulalanana.gb28181.sip.security.AccessControl accessControl;
     private final javax.sip.SipProvider provider;
     /** 国标级联管理器；可为 {@code null}（未启用级联）。 */
     private final io.github.rurulalanana.gb28181.sip.cascade.CascadeManager cascade;
@@ -71,11 +73,21 @@ public class GbSipListener implements SipListener {
                          CredentialProvider credentialProvider,
                          javax.sip.SipProvider provider,
                          io.github.rurulalanana.gb28181.sip.cascade.CascadeManager cascade) {
+        this(config, factory, callback, registry, credentialProvider, null, provider, cascade);
+    }
+
+    public GbSipListener(SipServerConfig config, SipMessageFactory factory,
+                         SipCallback callback, DeviceRegistry registry,
+                         CredentialProvider credentialProvider,
+                         io.github.rurulalanana.gb28181.sip.security.AccessControl accessControl,
+                         javax.sip.SipProvider provider,
+                         io.github.rurulalanana.gb28181.sip.cascade.CascadeManager cascade) {
         this.config = config;
         this.factory = factory;
         this.callback = callback;
         this.registry = registry;
         this.credentialProvider = credentialProvider;
+        this.accessControl = accessControl;
         this.provider = provider;
         this.cascade = cascade;
     }
@@ -236,6 +248,27 @@ public class GbSipListener implements SipListener {
         SipPeer peer = peerOf(event, deviceId);
         int expires = expiresOf(request);
         boolean unregister = expires == 0;
+
+        // ---- 接入控制（黑白名单）：标准 9.1，位于摘要认证之前 ----
+        /*
+         * 为什么在鉴权之前：访问控制是网络层语义，不该以「密码是否正确」为前提。
+         * 若放在鉴权之后，黑名单里的设备只要密码对了就能进 —— 那它就不叫黑名单。
+         * 更不能当成密码校验失败的替补方案：两者要能独立失效。
+         *
+         * 注销（Expires: 0）同样要过这一关，否则被拉黑的设备连踢都踢不掉。
+         */
+        if (accessControl != null
+                && accessControl != io.github.rurulalanana.gb28181.sip.security.AccessControl.PERMISSIVE
+                && accessControl.isEnabled()) {
+            io.github.rurulalanana.gb28181.sip.security.AccessControl.Decision decision =
+                    accessControl.check(deviceId, peer.getIp());
+            if (decision == null || !decision.isAllowed()) {
+                String reason = decision == null ? "接入控制返回空结果" : decision.getReason();
+                log.warn("注册被拒绝: device={}, ip={}, 原因={}", deviceId, peer.getIp(), reason);
+                reply(event, factory.buildResponse(Response.FORBIDDEN, request, null, null));
+                return;
+            }
+        }
 
         // ---- 摘要认证（标准 9.1.1 a） ----
         /*
