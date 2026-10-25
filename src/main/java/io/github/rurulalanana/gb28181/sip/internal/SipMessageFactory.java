@@ -341,6 +341,22 @@ public final class SipMessageFactory {
     }
 
     /**
+     * 构造 {@code INFO} 请求，显式指定消息体类型。
+     *
+     * <p>回放控制的消息体是 <b>RTSP 风格文本</b>而不是 SDP，
+     * 用 {@code application/sdp} 声明它会被部分设备判为格式非法。
+     * 国标惯例写 {@code application/MANSRTSP}。
+     *
+     * @param contentType 消息体类型；{@code null} 表示不带 Content-Type 头
+     */
+    public Request buildInfo(SipURI requestUri, SipURI fromUri, String fromTag,
+                             SipURI toUri, String toTag, String callId, long cSeq,
+                             String body, String contentType) {
+        return buildRequest("INFO", requestUri, fromUri, fromTag,
+                toUri, toTag, callId, cSeq, contentType, body);
+    }
+
+    /**
      * 构造 SUBSCRIBE 请求（标准 9.11，RFC 6665）。
      *
      * @param eventName 事件名，如 {@code Catalog}

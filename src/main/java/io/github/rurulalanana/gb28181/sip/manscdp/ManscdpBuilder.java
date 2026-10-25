@@ -446,6 +446,27 @@ public final class ManscdpBuilder {
         return simpleControl(sn, deviceId, "AlarmCmd", "ResetAlarm");
     }
 
+    /**
+     * 设备校时（标准 A.2.3.1.9 / 9.12）。
+     *
+     * <p>字段名是 {@code DeviceTime}，取值格式 <b>严格为
+     * {@code yyyy-MM-dd'T'HH:mm:ss}</b>（ISO 8601，无时区后缀）。
+     * 写成毫秒或带 {@code Z} 会被多数设备判为非法而整条丢弃 ——
+     * 而设备不会回错误应答，表现为「发了校时但时间没变」。
+     *
+     * <p><b>为什么必须做校时</b>：设备时钟漂移后，它上报录像时用的
+     * {@code StartTime/EndTime} 与平台侧的检索区间对不上，
+     * 用户按「昨天下午 3 点」查录像会什么都查不到，而录像其实存在。
+     * 这个问题的排查成本极高（看起来像设备没录像）。
+     *
+     * @param deviceTime {@code yyyy-MM-dd'T'HH:mm:ss}（本地时间）
+     */
+    public static String timeSync(int sn, String deviceId, String deviceTime) {
+        Element root = base("Control", CmdType.DEVICE_CONTROL, sn, deviceId);
+        ManscdpXml.addText(root, "DeviceTime", deviceTime);
+        return out(root);
+    }
+
     /** 存储卡格式化（A.2.3.1.13），{@code sdCardId=0} 表示全部。 */
     public static String formatSdCard(int sn, String deviceId, int sdCardId) {
         return simpleControl(sn, deviceId, "FormatSDCard", sdCardId);

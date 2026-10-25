@@ -526,6 +526,49 @@ public class Gb28181SipClient implements AutoCloseable {
         send(request, peer);
     }
 
+    /**
+     * 会话内 {@code INFO}，消息体为<b>原文</b>（不做 SDP 解析/校验）。
+     *
+     * <p><b>为什么需要它</b>：GB/T 28181 的回放控制（暂停/拖动/倍速）消息体
+     * 是 <b>RTSP 风格文本</b>，不是 SDP：
+     * <pre>
+     * PLAY RTSP/1.0\r\nCSeq: 1\r\nRange: npt=120-\r\n
+     * PAUSE RTSP/1.0\r\nCSeq: 2\r\nPauseTime: now\r\n
+     * PLAY RTSP/1.0\r\nCSeq: 3\r\nScale: 2.000000\r\n
+     * </pre>
+     * 而 {@link #info(String, String, String, SdpMessage)} 只能输出 SDP，
+     * 用它发控制指令设备不认（实测 LiveGBS 直接忽略，画面毫无反应）。
+     *
+     * @param contentType 消息体类型；国标设备普遍不校验，可传
+     *                    {@code application/MANSRTSP}（推荐）或 {@code null}
+     */
+    public void infoRaw(String deviceId, String channelId, String callId,
+                        String contentType, String body) {
+        SipPeer peer = requireSession(deviceId);
+        String target = StringUtils.isBlank(channelId) ? deviceId : channelId;
+        Response ok = responses.get(callId);
+        String fromTag = SipMessageFactory.newTag();
+        String toTag = null;
+        if (ok != null) {
+            FromHeader from = (FromHeader) ok.getHeader(SipHeaders.FROM);
+            ToHeader to = (ToHeader) ok.getHeader(SipHeaders.TO);
+            if (from != null && from.getTag() != null) {
+                toTag = from.getTag();
+            }
+            if (to != null && to.getTag() != null) {
+                fromTag = to.getTag();
+            }
+        }
+        Request request = factory.buildInfo(
+                requestUri(peer, target),
+                serverUri(deviceId, configHost(), configPort()),
+                fromTag,
+                factory.createUri(target, peer.getIp(), peer.getPort()),
+                toTag, callId, nextDialogCSeq(callId),
+                body, contentType);
+        send(request, peer);
+    }
+
     // ==================== 服务端应答（回应收到的 INVITE）====================
 
     /**
