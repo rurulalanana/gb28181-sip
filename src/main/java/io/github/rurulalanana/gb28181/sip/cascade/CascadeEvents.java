@@ -109,5 +109,14 @@ public final class CascadeEvents {
         private final String ssrc;
         /** 调用 Call-ID，用于 BYE 时停止推流。 */
         private final String callId;
+        /**
+         * 是否用 TCP 主动推流。
+         *
+         * <p>由上级 INVITE 的 {@code m=} 协议与 {@code a=setup:} 决定：
+         * {@code TCP/RTP/AVP} + {@code setup:passive}（或未声明）表示上级被动监听、
+         * 需要我们主动连过去；{@code RTP/AVP} 则是 UDP 主动。公网环境上级常常
+         * 只能收 TCP，所以这个标志必须从信令里带出来，不能写死。
+         */
+        private final boolean tcp;
     }
 }
