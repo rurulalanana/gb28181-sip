@@ -405,6 +405,25 @@ public class GbSipListener implements SipListener {
         }
 
         // 其余交由调用方处理
+        /*
+         * <Response> 是「对**我们下发**命令的应用层应答」——目录查询、录像检索、
+         * 设备信息、设备状态等，语义与请求完全不同，必须走 onManscdpResponse。
+         *
+         * 改造前两者都走 onManscdpRequest，后果：
+         *   1) 录像检索（RecordInfo）的应答没有消费者，平台一直等到超时，
+         *      界面上表现为「设备没有录像」—— 而设备其实回了完整列表；
+         *   2) 目录查询的 <Response> 被当成「目录推送」处理，跳过了分页聚合，
+         *      LiveGBS 这类一帧一页上报的平台会被读成「只有 1 个通道」。
+         * 也就是说 SipCallback#onManscdpResponse 此前是死代码，从未被调用。
+         */
+        if ("Response".equals(msg.getRootName())) {
+            try {
+                callback.onManscdpResponse(msgEvent);
+            } catch (Exception e) {
+                log.error("MANSCDP 应答回调异常: cmd={}", msg.getCmdType(), e);
+            }
+            return;
+        }
         Boolean handled = safeDispatch(msgEvent);
         if (handled == null && msg.cmdTypeEnum() == null) {
             callback.onUnknownCommand(msgEvent);

@@ -220,8 +220,34 @@ public class Gb28181SipClient implements AutoCloseable {
 
     /** 历史音视频文件检索（标准 9.8）。 */
     public void queryRecordInfo(String deviceId, String startTime, String endTime) {
-        sendMessage(deviceId,
-                ManscdpBuilder.recordInfoQuery(nextSn(), deviceId, startTime, endTime));
+        queryRecordInfo(deviceId, deviceId, startTime, endTime);
+    }
+
+    /**
+     * 历史音视频文件检索（标准 9.8），<b>SIP 寻址与 {@code <DeviceID>} 分开</b>。
+     *
+     * <p><b>为什么必须分开</b>：国标里录像挂在<b>通道</b>上，
+     * 所以 {@code <DeviceID>} 要写通道编码；而 SIP 的 To / 请求行 / 会话表
+     * 只认<b>设备编码</b>（设备才是注册实体）。
+     * 底层 {@link #sendMessage(String, String)} 只收一个 ID 并同时用于这两处，
+     * 于是「设备编码 ≠ 通道编码」时必然抛「设备未注册或会话已失效」：
+     * <pre>
+     * 直连摄像机：设备 34020000001310000001 / 通道 34020000001310000001 → 恰好相同，能跑通
+     * 下级平台：  设备 34020000002000000006 / 通道 34020000001310000001 → 报「设备未注册」
+     * </pre>
+     *
+     * @param sipTarget 设备编码（用于 SIP 寻址）
+     * @param channelId 通道编码（写入 {@code <DeviceID>}，也用于匹配应答）
+     */
+    public void queryRecordInfo(String sipTarget, String channelId,
+                                String startTime, String endTime) {
+        SipPeer peer = requireSession(sipTarget);
+        Request request = factory.buildMessage(
+                requestUri(peer, sipTarget),
+                serverUri(sipTarget, configHost(), configPort()),
+                factory.createUri(sipTarget, peer.getIp(), peer.getPort()),
+                ManscdpBuilder.recordInfoQuery(nextSn(), channelId, startTime, endTime));
+        send(request, peer);
     }
 
     // ==================== 控制命令 ====================
