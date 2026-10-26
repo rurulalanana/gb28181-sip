@@ -213,9 +213,21 @@ public class SdpMessage {
         return attr("filesize:" + size);
     }
 
-    /** {@code a=downloadspeed:N}。 */
-    public SdpMessage downloadspeed(int kbps) {
-        return attr("downloadspeed:" + kbps);
+    /**
+     * {@code a=downloadspeed:N}：请求设备按 N 倍速推送录像文件。
+     *
+     * <p>语义见标准 9.9.1 b) 与附录 G：媒体流接收者在请求的 SDP 里携带
+     * 期望的下载发送倍速，设备据此加快推流 —— 8 倍速下载 1 小时录像
+     * 只需约 7.5 分钟，而不是实时等满 1 小时。
+     *
+     * <p><b>N 是倍数不是码率</b>：取值来自设备目录应答的
+     * {@code Info/DownloadSpeed}（多档用 {@code /} 分隔，如 {@code 1/2/4/8}）。
+     * 设备不支持的档位会被忽略，退化为 1 倍速（实时）。
+     *
+     * @param speed 倍速，{@code 1} 表示不限速（实时）
+     */
+    public SdpMessage downloadspeed(int speed) {
+        return attr("downloadspeed:" + speed);
     }
 
     /** 追加任意 {@code a=} 属性。 */

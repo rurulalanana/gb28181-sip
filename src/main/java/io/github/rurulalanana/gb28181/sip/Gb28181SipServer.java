@@ -315,8 +315,16 @@ public class Gb28181SipServer implements AutoCloseable {
         return config;
     }
 
-    /** 包级访问注册表（供同包客户端使用）。 */
-    DeviceRegistry deviceRegistry() {
+    /**
+     * 设备注册表（只读查询用）。
+     *
+     * <p><b>为什么是 public</b>：{@code zlm} 模块要在收到 INVITE 时判断
+     * 「对端是否已注册」，从而拒绝公网扫描器凭空创建会话 ——
+     * 那个判断在 {@code io.github.rurulalanana.gb28181.sip.zlm} 包里，
+     * 包级可见拿不到。暴露的只是查询能力（{@code get/isOnline/listAll}），
+     * 注册与注销仍由协议栈内部驱动，不会破坏状态一致性。
+     */
+    public DeviceRegistry deviceRegistry() {
         return registry;
     }
 
