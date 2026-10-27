@@ -90,8 +90,9 @@ public final class ManscdpBuilder {
      */
     public static String catalogQuery(int sn, String deviceId, String startTime, String endTime) {
         Element root = base("Query", CmdType.CATALOG, sn, deviceId);
-        ManscdpXml.addText(root, "StartTime", startTime);
-        ManscdpXml.addText(root, "EndTime", endTime);
+        // 时间同样必须是 ISO8601（见 isoTime 的说明）
+        ManscdpXml.addText(root, "StartTime", isoTime(startTime));
+        ManscdpXml.addText(root, "EndTime", isoTime(endTime));
         return out(root);
     }
 
@@ -107,13 +108,85 @@ public final class ManscdpBuilder {
 
     /**
      * 文件目录检索（A.2.4.5）。
+     *
      * <p>标准中 {@code StartTime} / {@code EndTime} 为<b>必选</b>（XSD 未给 minOccurs）。
+     *
+     * <p>默认补 {@code <Secrecy>0</Secrecy>} 与 {@code <Type>all</Type>}，
+     * 见 {@link #recordInfoQuery(int, String, String, String, int, String)}。
      */
     public static String recordInfoQuery(int sn, String deviceId, String startTime, String endTime) {
+        return recordInfoQuery(sn, deviceId, startTime, endTime, 0, "all");
+    }
+
+    /**
+     * 文件目录检索（A.2.4.5），可指定涉密属性与录像类型。
+     *
+     * <h3>为什么要带 {@code Secrecy} / {@code Type}</h3>
+     * 标准把这两项列为可选（{@code Type} 元素在 XSD 里就是 minOccurs=0），
+     * 但<b>大华 NVR 不带 {@code <Type>} 就不返回任何录像</b>：
+     * 实测下发的报文只有 CmdType/SN/DeviceID/StartTime/EndTime 时，
+     * 设备回 {@code 400 wait for recordinfo timeout[15s]} ——
+     * 它自己的报错文本会把人引向「下级超时」，而真实原因是必备字段缺失。
+     *
+     * <p>这一条在与 wvp-GB28181-pro 实现对照后才找到，它的
+     * {@code SIPCommander#recordInfoQuery} 里就写着
+     * 「大华NVR要求必须增加一个值为all的文本元素节点Type」。
+     *
+     * <p>补上这两个字段对其他厂商没有副作用 —— 标准里的可选字段，
+     * 不支持时设备忽略即可。
+     *
+     * @param secrecy 保密属性：0 不涉密、1 涉密
+     * @param type    录像类型：{@code all} / {@code time} / {@code alarm} / {@code manual}
+     */
+    public static String recordInfoQuery(int sn, String deviceId, String startTime,
+                                         String endTime, int secrecy, String type) {
         Element root = base("Query", CmdType.RECORD_INFO, sn, deviceId);
-        ManscdpXml.addText(root, "StartTime", startTime);
-        ManscdpXml.addText(root, "EndTime", endTime);
+        ManscdpXml.addText(root, "StartTime", isoTime(startTime));
+        ManscdpXml.addText(root, "EndTime", isoTime(endTime));
+        ManscdpXml.addText(root, "Secrecy", secrecy);
+        ManscdpXml.addText(root, "Type",
+                (type == null || type.trim().isEmpty()) ? "all" : type.trim());
         return out(root);
+    }
+
+    /**
+     * 时间串规范化为标准要求的 ISO8601（日期与时间之间用 {@code T}）。
+     *
+     * <h3>为什么必须做这一步</h3>
+     * GB/T 28181—2022 表 45 规定 {@code StartTime/EndTime} 格式为
+     * {@code yyyy-MM-ddTHH:mm:ss}，<b>中间是 T 不是空格</b>。
+     *
+     * <p>我们原来直接下发了数据库/接口里的空格形式
+     * （{@code 2026-10-26 12:00:00}），而级联设备（实测 LiveGBS v250103）
+     * 严格按 ISO8601 解析：<b>空格形式它一个字节都不回</b>，只是内部等满了
+     * 自己的超时后回 {@code 400 wait for recordinfo timeout[15s]} ——
+     * 那句报错把人引向「下级超时」，而其真实原因是时间格式不合规。
+     *
+     * <p>实测对比（同一设备、同一时段，其余字段完全相同）：
+     * <pre>
+     * StartTime=2026-10-26 12:00:00  → 20 秒内无任何应答
+     * StartTime=2026-10-26T12:00:00  → 立即 200 OK，随后收到 SumNum=1 的数据帧
+     * </pre>
+     *
+     * <p>已在带 {@code T} 的输入上幂等：重复调用不会变成 {@code TT}。
+     *
+     * @param time 形如 {@code 2026-10-26 12:00:00} 或 {@code 2026-10-26T12:00:00}；
+     *             已经是带时区/毫秒的串也只会动第一个空格
+     * @return 规范化后的时间串；{@code null}/空时原样返回
+     */
+    static String isoTime(String time) {
+        if (time == null) {
+            return null;
+        }
+        String trimmed = time.trim();
+        if (trimmed.isEmpty() || trimmed.indexOf('T') > 0) {
+            return trimmed;
+        }
+        int space = trimmed.indexOf(' ');
+        if (space < 0) {
+            return trimmed;
+        }
+        return trimmed.substring(0, space) + "T" + trimmed.substring(space + 1).trim();
     }
 
     /** 设备预置位查询（A.2.4.8）。 */
