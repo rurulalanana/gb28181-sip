@@ -20,6 +20,7 @@ import io.github.rurulalanana.gb28181.sip.security.DigestAuth;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 
+import javax.sip.ClientTransaction;
 import javax.sip.DialogTerminatedEvent;
 import javax.sip.IOExceptionEvent;
 import javax.sip.RequestEvent;
@@ -110,9 +111,21 @@ public class GbSipListener implements SipListener {
             // 规定每跳必带），缺失时抛 "Missing a required header : Max-Forwards"，
             // 导致应答被静默丢弃 —— 部分设备会因收不到确认而不推流。
             factory.ensureMaxForwards(request);
+            /*
+             * INVITE 还必须带 Contact，否则 getNewServerTransaction 抛
+             * "Missing a required header : Contact"。
+             *
+             * <p>这是「扫描器 INVITE 永远不应答、32 秒后报 SIP 事务超时」的根因：
+             * 缺 Contact 时我们<b>连 403 都发不出去</b>，对方的服务端事务只能等到超时。
+             * 公网扫描器与部分非标准实现普遍不带该头。
+             * 我们只回一个拒绝，不依赖 Contact 语义，用 From 地址补即可。
+             */
+            if (Request.INVITE.equals(request.getMethod())) {
+                factory.ensureContact(request);
+            }
             return provider.getNewServerTransaction(request);
         } catch (Exception e) {
-            log.warn("创建服务端事务失败: {}", e.getMessage());
+            log.debug("创建服务端事务失败，改用无事务发送: {}", e.getMessage());
             return null;
         }
     }
@@ -161,10 +174,20 @@ public class GbSipListener implements SipListener {
 
     @Override
     public void processResponse(ResponseEvent responseEvent) {
+        /*
+         * 先把应答登记进客户端，再回调业务方。
+         *
+         * <p><b>顺序不能反</b>：业务方在 onRawResponse 里要立刻回 ACK，
+         * 而 ACK 的 From tag 必须与 INVITE 的 From tag 一致（RFC 3261 §13.2.2.4），
+         * 那个 tag 是从「本次 200 OK」里取的。若先回调、后登记，
+         * 业务方取不到 200 OK，就会退回随机 tag —— 抓包可见
+         * {@code INVITE From: tag=6c07128a…} 而 {@code ACK From: tag=952d603a…}，
+         * 设备会把 ACK 当成另一个对话框的报文丢弃。
+         */
+        Gb28181SipClientBridge.onResponse(responseEvent);
         callback.onRawResponse(responseEvent);
         // 级联目录聚合：下级平台的 Catalog 应答在此汇聚
         collectCascadeCatalog(responseEvent);
-        Gb28181SipClientBridge.onResponse(responseEvent);
     }
 
     /**
@@ -219,8 +242,45 @@ public class GbSipListener implements SipListener {
 
     @Override
     public void processTimeout(TimeoutEvent timeoutEvent) {
-        log.warn("SIP 事务超时: server={}", timeoutEvent.isServerTransaction());
+        /*
+         * 区分两种完全不同的「服务端事务超时」：
+         *
+         * <ol>
+         *   <li><b>我们已经应答过、但对端没 ACK</b>（公网扫描器、非标准实现）。
+         *     INVITE 的非 2xx 最终应答要求 UAC 回 ACK，不回就一直重传，
+         *     直到 Timer H 超时。这是<b>对端的问题</b>，我们无能为力也不需处理 ——
+         *     日志里每分钟刷一条 WARN 只会掩盖真正的故障。</li>
+         *   <li><b>我们根本没应答</b>。这才是要排查的（曾经因请求缺 Contact 导致
+         *     应答发不出去，见 {@code SipMessageFactory#ensureContact}）。</li>
+         * </ol>
+         */
+        if (timeoutEvent.isServerTransaction()) {
+            String callId = timedOutCallId(timeoutEvent);
+            Integer answered = InviteResponseRegistry.consume(callId);
+            if (answered != null) {
+                log.debug("对端未 ACK 我们的最终应答（{}）: callId={}", answered, callId);
+                Gb28181SipClientBridge.onTimeout(timeoutEvent);
+                return;
+            }
+        }
+        log.warn("SIP 事务超时: server={}{}", timeoutEvent.isServerTransaction(),
+                describeClientTimeout(timeoutEvent));
         Gb28181SipClientBridge.onTimeout(timeoutEvent);
+    }
+
+    /** 从超时事件里取出 Call-ID（仅服务端事务有请求可读）。 */
+    private static String timedOutCallId(TimeoutEvent event) {
+        try {
+            ServerTransaction tx = event.getServerTransaction();
+            if (tx == null || tx.getRequest() == null) {
+                return null;
+            }
+            CallIdHeader header = (CallIdHeader) tx.getRequest()
+                    .getHeader(SipHeaders.CALL_ID);
+            return header == null ? null : header.getCallId();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     @Override
@@ -603,15 +663,82 @@ public class GbSipListener implements SipListener {
     }
 
     private void send(RequestEvent event, Response response) {
+        recordAnsweredInvite(event, response);
         try {
             ServerTransaction transaction = serverTransaction(event);
             if (transaction != null) {
                 transaction.sendResponse(response);
-            } else {
-                log.warn("无服务端事务，丢弃状态码 {} 的应答", response.getStatusCode());
+                return;
             }
         } catch (Exception e) {
-            log.error("发送响应失败: {}", response.getStatusCode(), e);
+            log.debug("经事务发送应答失败，改用无事务发送: {}", e.getMessage());
+        }
+        /*
+         * 无事务发送（stateless）。
+         *
+         * <p><b>必须有这条兜底</b>：只要建不出服务端事务（例如对端请求缺
+         * Contact / Max-Forwards 这类头），原来的实现就只打一条 warn 把应答丢掉，
+         * 对方永远收不到任何响应 —— 它的事务必然超时，我们这边也会在 32 秒后
+         * 刷一条「SIP 事务超时: server=true」。
+         *
+         * <p>{@link SipProvider#sendResponse} 走 Via 头直接发出，不需要事务，
+         * 是 RFC 3261 允许的无状态应答方式。拒绝一个非法请求用它正合适 ——
+         * 反正我们本来就不想维护这个会话。
+         */
+        try {
+            provider.sendResponse(response);
+        } catch (Exception e) {
+            log.warn("发送应答失败: status={} {}", response.getStatusCode(), e.getMessage());
+        }
+    }
+
+    /**
+     * 记录「已对某个 INVITE 发出最终应答」。
+     *
+     * <p>配合 {@link #processTimeout} 区分两种超时：对端没 ACK（正常现象，
+     * 公网扫描器普遍如此）与我们压根没应答（真故障）。
+     * 记录逻辑在 {@link InviteResponseRegistry}，因为 INVITE 的应答还有一条
+     * 由 {@code Gb28181SipClient} 发送的路径。
+     */
+    private void recordAnsweredInvite(RequestEvent event, Response response) {
+        try {
+            if (!Request.INVITE.equalsIgnoreCase(event.getRequest().getMethod())) {
+                return;
+            }
+            CallIdHeader header = (CallIdHeader) event.getRequest()
+                    .getHeader(SipHeaders.CALL_ID);
+            InviteResponseRegistry.answered(
+                    header == null ? null : header.getCallId(), response.getStatusCode());
+        } catch (Exception e) {
+            log.debug("记录 INVITE 应答失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 客户端事务超时时，把「发给谁、什么命令」写清楚。
+     *
+     * <p>原来这里只有 {@code SIP 事务超时: server=false} 一句 ——
+     * 既不知道是哪个设备、也不知道超时的是目录查询还是录像检索，
+     * 排障时等于零信息，反而会被当成「平台有毛病」的噪音。
+     *
+     * <p>这是<b>正常且必然</b>会发生的情况：国标设备离线、
+     * 或对某类查询不支持时就是不应答，平台侧只能等满 32 秒。
+     */
+    private static String describeClientTimeout(TimeoutEvent event) {
+        try {
+            ClientTransaction tx = event.getClientTransaction();
+            Request request = tx == null ? null : tx.getRequest();
+            if (request == null) {
+                return "";
+            }
+            String method = request.getMethod();
+            String target = request.getRequestURI() == null
+                    ? "?" : request.getRequestURI().toString();
+            CallIdHeader callId = (CallIdHeader) request.getHeader(SipHeaders.CALL_ID);
+            return " [" + method + " → " + target
+                    + (callId == null ? "" : ", callId=" + callId.getCallId()) + "]";
+        } catch (Exception e) {
+            return "";
         }
     }
 

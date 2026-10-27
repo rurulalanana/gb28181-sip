@@ -4,6 +4,7 @@ import io.github.rurulalanana.gb28181.sip.constant.CmdType;
 import io.github.rurulalanana.gb28181.sip.constant.GbId;
 import io.github.rurulalanana.gb28181.sip.device.DeviceSession;
 import io.github.rurulalanana.gb28181.sip.event.SipPeer;
+import io.github.rurulalanana.gb28181.sip.internal.InviteResponseRegistry;
 import io.github.rurulalanana.gb28181.sip.internal.SipBuildException;
 import io.github.rurulalanana.gb28181.sip.internal.SipHeaders;
 import io.github.rurulalanana.gb28181.sip.internal.SipMessageFactory;
@@ -238,9 +239,11 @@ public class Gb28181SipClient implements AutoCloseable {
      *
      * @param sipTarget 设备编码（用于 SIP 寻址）
      * @param channelId 通道编码（写入 {@code <DeviceID>}，也用于匹配应答）
+     * @return 本次请求的 {@code Call-ID}，可用于 {@link #awaitResponse(String, long)}
+     *         观察设备的最终响应
      */
-    public void queryRecordInfo(String sipTarget, String channelId,
-                                String startTime, String endTime) {
+    public String queryRecordInfo(String sipTarget, String channelId,
+                                  String startTime, String endTime) {
         SipPeer peer = requireSession(sipTarget);
         Request request = factory.buildMessage(
                 requestUri(peer, sipTarget),
@@ -248,6 +251,7 @@ public class Gb28181SipClient implements AutoCloseable {
                 factory.createUri(sipTarget, peer.getIp(), peer.getPort()),
                 ManscdpBuilder.recordInfoQuery(nextSn(), channelId, startTime, endTime));
         send(request, peer);
+        return callIdOf(request);
     }
 
     // ==================== 控制命令 ====================
@@ -439,10 +443,24 @@ public class Gb28181SipClient implements AutoCloseable {
     public void ackInvite(String deviceId, String channelId, String callId, String toTag, String sdp) {
         SipPeer peer = requireSession(deviceId);
         String target = StringUtils.isBlank(channelId) ? deviceId : channelId;
+        /*
+         * ACK 的 From tag 必须与 INVITE 的 From tag **完全相同**。
+         *
+         * <p>RFC 3261 §13.2.2.4：ACK 与 INVITE 属于同一对话框，
+         * From tag（我们自己的 tag）必须一致。原来这里用
+         * {@code SipMessageFactory.newTag()} 生成随机 tag，抓包可见：
+         * <pre>
+         * INVITE  From: ...;tag=54b201738dcb5dc6
+         * ACK     From: ...;tag=6f8829a0e43b0d05   ← 随机，错
+         * </pre>
+         * 这会让设备把 ACK 当作「另一个对话框的报文」而丢弃，
+         * 会话停留在未确认状态 —— 表现为回放能出画面但控制指令全部无效。
+         */
+        String fromTag = dialogTagsOf(callId)[0];
         Request ack = factory.buildRequest(Request.ACK,
                 requestUri(peer, target),
                 serverUri(deviceId, configHost(), configPort()),
-                SipMessageFactory.newTag(),
+                fromTag,
                 factory.createUri(target, peer.getIp(), peer.getPort()),
                 toTag, callId, 1L,
                 sdp == null ? null : SipMessageFactory.SDP_CONTENT_TYPE, sdp);
@@ -503,25 +521,13 @@ public class Gb28181SipClient implements AutoCloseable {
     public void info(String deviceId, String channelId, String callId, SdpMessage sdp) {
         SipPeer peer = requireSession(deviceId);
         String target = StringUtils.isBlank(channelId) ? deviceId : channelId;
-        Response ok = responses.get(callId);
-        String fromTag = SipMessageFactory.newTag();
-        String toTag = null;
-        if (ok != null) {
-            FromHeader from = (FromHeader) ok.getHeader(SipHeaders.FROM);
-            ToHeader to = (ToHeader) ok.getHeader(SipHeaders.TO);
-            if (from != null && from.getTag() != null) {
-                toTag = from.getTag();
-            }
-            if (to != null && to.getTag() != null) {
-                fromTag = to.getTag();
-            }
-        }
+        String[] tags = dialogTagsOf(callId);
         Request request = factory.buildInfo(
                 requestUri(peer, target),
                 serverUri(deviceId, configHost(), configPort()),
-                fromTag,
+                tags[0],
                 factory.createUri(target, peer.getIp(), peer.getPort()),
-                toTag, callId, nextDialogCSeq(callId),
+                tags[1], callId, nextDialogCSeq(callId),
                 sdp == null ? null : sdp.toText());
         send(request, peer);
     }
@@ -546,19 +552,9 @@ public class Gb28181SipClient implements AutoCloseable {
                         String contentType, String body) {
         SipPeer peer = requireSession(deviceId);
         String target = StringUtils.isBlank(channelId) ? deviceId : channelId;
-        Response ok = responses.get(callId);
-        String fromTag = SipMessageFactory.newTag();
-        String toTag = null;
-        if (ok != null) {
-            FromHeader from = (FromHeader) ok.getHeader(SipHeaders.FROM);
-            ToHeader to = (ToHeader) ok.getHeader(SipHeaders.TO);
-            if (from != null && from.getTag() != null) {
-                toTag = from.getTag();
-            }
-            if (to != null && to.getTag() != null) {
-                fromTag = to.getTag();
-            }
-        }
+        String[] tags = dialogTagsOf(callId);
+        String fromTag = tags[0];
+        String toTag = tags[1];
         Request request = factory.buildInfo(
                 requestUri(peer, target),
                 serverUri(deviceId, configHost(), configPort()),
@@ -567,6 +563,45 @@ public class Gb28181SipClient implements AutoCloseable {
                 toTag, callId, nextDialogCSeq(callId),
                 body, contentType);
         send(request, peer);
+    }
+
+    /**
+     * 取回放/点播对话框的两个 tag：{@code [我方 From tag, 设备 To tag]}。
+     *
+     * <h3>为什么必须按这个顺序取</h3>
+     * 我们主动发起 INVITE（UAC），设备回的 200 OK 里：
+     * <ul>
+     *   <li>{@code From} = 我们 INVITE 的 From，带<b>我方 tag</b>；</li>
+     *   <li>{@code To} = 我们 INVITE 的 To，后面被设备<b>追加了它的 tag</b>。</li>
+     * </ul>
+     * 所以后续 INFO / ACK 必须：From 用 {@code ok.getFrom().getTag()}，
+     * To 用 {@code ok.getTo().getTag()}。
+     *
+     * <p><b>原来这里是写反的</b>（To 取 From 的 tag、From 取 To 的 tag），
+     * 于是 INFO 落在对话框之外。实测抓包：
+     * <pre>
+     * INVITE  From: ...;tag=54b201738dcb5dc6      To: ...（无 tag）
+     * 200 OK  From: ...;tag=54b201738dcb5dc6      To: ...;tag=469824905
+     * INFO    From: ...;tag=469824905  ← 用了设备的 tag
+     *         To:   ...;tag=54b201738dcb5dc6  ← 用了我方的 tag
+     * </pre>
+     * 设备对这种「不在对话内」的 INFO 会回 {@code 200 OK}（宽容），
+     * 然后<b>直接忽略指令</b> —— 表现就是「点进度条毫无反应」、
+     * 「暂停不生效」、「倍速不变」，而日志里一切正常。
+     *
+     * @return 长度为 2 的数组；拿不到 200 OK 时 From 用随机新 tag、To 为 {@code null}
+     */
+    private String[] dialogTagsOf(String callId) {
+        Response ok = responses.get(callId);
+        if (ok == null) {
+            return new String[]{SipMessageFactory.newTag(), null};
+        }
+        FromHeader from = (FromHeader) ok.getHeader(SipHeaders.FROM);
+        ToHeader to = (ToHeader) ok.getHeader(SipHeaders.TO);
+        String fromTag = (from != null && from.getTag() != null)
+                ? from.getTag() : SipMessageFactory.newTag();
+        String toTag = (to != null && to.getTag() != null) ? to.getTag() : null;
+        return new String[]{fromTag, toTag};
     }
 
     // ==================== 服务端应答（回应收到的 INVITE）====================
@@ -585,16 +620,7 @@ public class Gb28181SipClient implements AutoCloseable {
         // RFC 3261 §13.3.1.4：INVITE 的 200 OK 必须携带 Contact 头
         response = factory.withContact(response, server.getConfig().getServerId(),
                 contactHost(), server.getConfig().getPort());
-        try {
-            ServerTransaction transaction = serverTransaction(requestEvent);
-            if (transaction != null) {
-                transaction.sendResponse(response);
-            } else {
-                log.warn("无服务端事务，丢弃 200 OK 应答（SIP 服务未启动？）");
-            }
-        } catch (Exception e) {
-            throw new SipBuildException("应答 INVITE 失败", e);
-        }
+        sendInviteResponse(requestEvent, response);
     }
 
     /**
@@ -607,15 +633,47 @@ public class Gb28181SipClient implements AutoCloseable {
     public void rejectInvite(RequestEvent requestEvent, int statusCode) {
         Response response = factory.buildResponse(statusCode,
                 requestEvent.getRequest(), null, null);
+        sendInviteResponse(requestEvent, response);
+    }
+
+    /**
+     * 发送 INVITE 的最终应答（事务优先，失败则无事务发送）。
+     *
+     * <p><b>为什么必须有兜底</b>：jain-sip 建服务端事务时会校验请求头，
+     * INVITE 缺 {@code Contact}（公网扫描器、部分非标准实现普遍如此）时直接抛
+     * {@code TransactionUnavailableException}。原实现把它转成异常往上抛，
+     * 结果<b>一个字节都发不出去</b>：对端事务等到超时，我们日志里刷
+     * {@code SIP 事务超时: server=true}。
+     *
+     * <p>{@link SipProvider#sendResponse} 走 Via 头无状态发送，不需要事务，
+     * 对「拒绝一个非法请求」这种场景完全够用。
+     */
+    private void sendInviteResponse(RequestEvent requestEvent, Response response) {
+        /*
+         * 先登记本次应答。
+         *
+         * 对端不回 ACK 时（公网扫描器普遍如此），INVITE 服务端事务会在
+         * Timer H 超时并触发 TimeoutEvent；监听器靠这份登记把它与
+         * 「我们压根没应答」区分开，否则真故障会被噪音淹没。
+         */
+        InviteResponseRegistry.answered(callIdOf(requestEvent.getRequest()),
+                response.getStatusCode());
         try {
             ServerTransaction transaction = serverTransaction(requestEvent);
             if (transaction != null) {
                 transaction.sendResponse(response);
-            } else {
-                log.warn("无服务端事务，丢弃 {} 拒绝应答（SIP 服务未启动？）", statusCode);
+                return;
             }
         } catch (Exception e) {
-            throw new SipBuildException("拒绝 INVITE 失败", e);
+            log.debug("经事务发送 INVITE 应答复失败，改用无事务发送: {}", e.getMessage());
+        }
+        try {
+            SipProvider provider = server.sipProvider();
+            if (provider != null) {
+                provider.sendResponse(response);
+            }
+        } catch (Exception e) {
+            throw new SipBuildException("发送 INVITE 应答失败: " + response.getStatusCode(), e);
         }
     }
 
@@ -636,13 +694,20 @@ public class Gb28181SipClient implements AutoCloseable {
         if (provider == null) {
             return null;
         }
+        /*
+         * INVITE 必须带 Contact，否则 getNewServerTransaction 抛
+         * "Missing a required header : Contact"，应答发不出去。
+         * 详见 SipMessageFactory#ensureContact 的说明。
+         */
+        if (Request.INVITE.equalsIgnoreCase(requestEvent.getRequest().getMethod())) {
+            factory.ensureContact(requestEvent.getRequest());
+        }
         try {
             return provider.getNewServerTransaction(requestEvent.getRequest());
         } catch (Exception e) {
             throw new SipBuildException("创建服务端事务失败", e);
         }
     }
-
     /**
      * Contact 头主机。与 {@link #configHost()} 同源，保证应答与请求里的地址一致。
      */

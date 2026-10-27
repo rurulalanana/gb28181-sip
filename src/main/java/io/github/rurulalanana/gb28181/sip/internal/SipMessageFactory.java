@@ -326,6 +326,47 @@ public final class SipMessageFactory {
     }
 
     /**
+     * 补齐 {@code Contact} 头。
+     *
+     * <p><b>这是「INVITE 永远不应答」的直接原因</b>：jain-sip 的
+     * {@code SipProviderImpl.getNewServerTransaction()} 会调
+     * {@code SIPRequest.checkHeaders()}，而该方法<b>强制要求 INVITE 带 Contact</b>，
+     * 缺失时抛：
+     * <pre>TransactionUnavailableException: Missing a required header : Contact</pre>
+     * 于是我们既建不了服务端事务、也发不出任何应答（连 403/488 都发不了），
+     * 对方的服务端事务停在 Proceeding 状态、32 秒后触发
+     * {@code SIP 事务超时: server=true}。
+     *
+     * <p>实测公网扫描器与部分非标准实现发来的 INVITE 普遍不带 Contact。
+     * 我们只是要回一个拒绝，不依赖对端 Contact 的真实含义，
+     * 用 From 的地址补一个即可（RFC 3261 允许 Contact 与 From 同址）。
+     *
+     * @return 是否补齐（原本已存在则返回 false）
+     */
+    public boolean ensureContact(Request request) {
+        if (request.getHeader(SipHeaders.CONTACT) != null) {
+            return false;
+        }
+        try {
+            /*
+             * Request 没有 getFrom()，要经 Header 取。
+             * 取不到也照样补 —— 用 Request-URI 兜底，总比发不出应答好。
+             */
+            javax.sip.header.FromHeader fromHeader = (javax.sip.header.FromHeader)
+                    request.getHeader(SipHeaders.FROM);
+            Object uriSource = fromHeader != null ? fromHeader.getAddress().getURI()
+                    : request.getRequestURI();
+            javax.sip.address.Address contact = addressFactory.createAddress(
+                    addressFactory.createURI(uriSource.toString()));
+            request.addHeader(headerFactory.createContactHeader(contact));
+            return true;
+        } catch (Exception e) {
+            log.warn("补齐 Contact 失败: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
      * 构造会话内 {@code INFO} 请求（标准附录 D 回放控制，RFC 2976）。
      *
      * <p>与 {@link #buildInvite} 不同：INFO 必须复用 INVITE 的 Call-ID 与对端 tag，
